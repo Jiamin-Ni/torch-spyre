@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <c10/core/Allocator.h>
 #include <cstddef>
 #include <vector>
 
@@ -218,9 +219,26 @@ class JobPlan {
    */
   std::vector<JobPlanStep>::const_iterator cend() const;
 
+  /**
+   * @brief Set the program memory allocation
+   *
+   * Stores the DataPtr holding the compiled program on device memory.
+   * This keeps the program memory alive for the lifetime of the JobPlan.
+   *
+   * @param program_memory DataPtr holding the compiled program on device
+   */
+  void setProgramMemory(c10::DataPtr program_memory);
+
+  /**
+   * @brief Get the program memory allocation
+   * @return Const reference to the program memory DataPtr
+   */
+  const c10::DataPtr& getProgramMemory() const;
+
  private:
   std::vector<JobPlanStep> steps_;
   std::vector<std::vector<int64_t>> expected_input_shapes_;
+  c10::DataPtr program_memory_;
 };
 
 }  // namespace spyre
