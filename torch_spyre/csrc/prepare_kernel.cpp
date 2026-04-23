@@ -203,10 +203,25 @@ JobPlanStep ParseSpyreCodeCommand(
       return JobPlanStep(h2d_op);
 
     } else if (direction == 1) {
-      // TODO(jni): check if this is required
       // Device-to-Host transfer
-      throw std::runtime_error("Invalid DataTransfer direction: " +
-                               std::to_string(direction));
+      // Extract host and device addresses
+      if (!properties.contains("dev_ptr")) {
+        throw std::runtime_error("DataTransfer D2H missing 'dev_ptr' property");
+      }
+
+      std::string dev_ptr_str = properties["dev_ptr"].get<std::string>();
+
+      // TODO(jni): indicate which HostCompute the output goes to
+      void* host_addr = nullptr;
+      uint64_t device_addr = std::stoull(dev_ptr_str);
+
+      // Compute CompositeAddress with offset from device_addr
+      flex::CompositeAddress comp_addr =
+          ComputeOffsetAddress(program_address, device_addr);
+
+      auto d2h_op =
+          std::make_shared<flex::RuntimeOperationD2H>(comp_addr, host_addr);
+      return JobPlanStep(d2h_op);
 
     } else {
       throw std::runtime_error("Invalid DataTransfer direction: " +
