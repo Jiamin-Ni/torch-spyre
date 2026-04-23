@@ -83,7 +83,9 @@ void JobPlanStep::setHostCompute(HostComputeStep&& host_compute) {
   host_compute_ = std::move(host_compute);
 }
 
-void JobPlanStep::clearHostCompute() { host_compute_ = std::nullopt; }
+void JobPlanStep::clearHostCompute() {
+  host_compute_ = std::nullopt;
+}
 
 bool JobPlanStep::hasOperation() const {
   return operation_ != nullptr;

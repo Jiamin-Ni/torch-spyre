@@ -84,7 +84,8 @@ std::shared_ptr<HostComputeMetadata> HostComputeStep::getMetadataPtr() const {
   return metadata_;
 }
 
-void HostComputeStep::setMetadata(std::shared_ptr<HostComputeMetadata> metadata) {
+void HostComputeStep::setMetadata(
+    std::shared_ptr<HostComputeMetadata> metadata) {
   metadata_ = std::move(metadata);
 }
 
