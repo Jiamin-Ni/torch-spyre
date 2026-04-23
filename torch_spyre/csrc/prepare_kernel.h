@@ -18,7 +18,7 @@
 
 #include <c10/core/Allocator.h>
 
-#include <filesystem>
+#include <filesystem>  // NOLINT
 #include <memory>
 #include <string>
 #include <vector>

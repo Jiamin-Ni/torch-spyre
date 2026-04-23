@@ -22,6 +22,9 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "common/json.hpp"
 #include "flex/allocator/alloc_address.hpp"
@@ -53,17 +56,18 @@ static std::shared_ptr<flex::RuntimeEntry> getGlobalRuntime() {
   return getGlobalRuntimeInstance();
 }
 
-// TODO: check CompositeAddress updates and verify
+// TODO(jni): check CompositeAddress updates and verify
 // Helper to extract CompositeAddress from c10::DataPtr
-static flex::CompositeAddress ExtractCompositeAddress(const c10::DataPtr& data_ptr) {
+static flex::CompositeAddress ExtractCompositeAddress(
+    const c10::DataPtr& data_ptr) {
   auto* ctx = static_cast<SharedOwnerCtx*>(data_ptr.get_context());
   if (!ctx || !ctx->owner) {
     throw std::runtime_error("Failed to get allocation context from DataPtr");
   }
-  
+
   uint64_t dmpa = ctx->owner->DmpaAsBytes();
   size_t alloc_size = ctx->owner->SizeAsBytes();
-  
+
   // Create CompositeAddress from the DMPA
   // region_id=0 for now, domain_id=0 for single-domain allocation
   flex::LogicalAddress logical_addr(0, dmpa);
@@ -71,25 +75,23 @@ static flex::CompositeAddress ExtractCompositeAddress(const c10::DataPtr& data_p
   return flex::CompositeAddress(chunk);
 }
 
-// TODO: check CompositeAddress updates and verify
+// TODO(jni): check CompositeAddress updates and verify
 // Helper to compute CompositeAddress with offset from device_addr for program
 static flex::CompositeAddress ComputeOffsetAddress(
-    const flex::CompositeAddress& program_address,
-    uint64_t device_addr) {
+    const flex::CompositeAddress& program_address, uint64_t device_addr) {
   // Calculate offset: device_addr is relative to 112GB base
   constexpr uint64_t BASE_ADDR = 112ULL * 1024 * 1024 * 1024;
   uint64_t offset = device_addr - BASE_ADDR;
-  
+
   // Create CompositeAddress using program_address with offset
   if (program_address.chunks().empty()) {
     throw std::runtime_error("program_address has no chunks");
   }
-  
+
   // Get the first chunk and add offset to its address
   const auto& base_chunk = program_address.chunks()[0];
-  flex::LogicalAddress offset_addr(
-      base_chunk.addr.region_id,
-      base_chunk.addr.offset + offset);
+  flex::LogicalAddress offset_addr(base_chunk.addr.region_id,
+                                   base_chunk.addr.offset + offset);
   flex::Chunk offset_chunk(offset_addr, 0, base_chunk.domain_id);
   return flex::CompositeAddress(offset_chunk);
 }
@@ -183,25 +185,25 @@ JobPlanStep ParseSpyreCodeCommand(
       // Host-to-Device transfer
       // Extract host and device addresses
       if (!properties.contains("dev_ptr")) {
-        throw std::runtime_error(
-            "DataTransfer H2D missing 'dev_ptr' property");
+        throw std::runtime_error("DataTransfer H2D missing 'dev_ptr' property");
       }
 
       std::string dev_ptr_str = properties["dev_ptr"].get<std::string>();
 
-      // TODO: indicate which HostCompute the input is from
+      // TODO(jni): indicate which HostCompute the input is from
       void* host_addr = nullptr;
       uint64_t device_addr = std::stoull(dev_ptr_str);
 
       // Compute CompositeAddress with offset from device_addr
-      flex::CompositeAddress comp_addr = ComputeOffsetAddress(program_address, device_addr);
+      flex::CompositeAddress comp_addr =
+          ComputeOffsetAddress(program_address, device_addr);
 
       auto h2d_op =
           std::make_shared<flex::RuntimeOperationH2D>(host_addr, comp_addr);
       return JobPlanStep(h2d_op);
 
     } else if (direction == 1) {
-      // TODO: check if this is required
+      // TODO(jni): check if this is required
       // Device-to-Host transfer
       throw std::runtime_error("Invalid DataTransfer direction: " +
                                std::to_string(direction));
@@ -298,11 +300,13 @@ c10::DataPtr ExecuteJobPreparationPlan(
       uint64_t device_addr = std::stoull(dev_ptr_str);
 
       // Extract CompositeAddress from allocated_ptr and compute offset
-      flex::CompositeAddress program_address = ExtractCompositeAddress(allocated_ptr);
-      flex::CompositeAddress comp_addr = ComputeOffsetAddress(program_address, device_addr);
+      flex::CompositeAddress program_address =
+          ExtractCompositeAddress(allocated_ptr);
+      flex::CompositeAddress comp_addr =
+          ComputeOffsetAddress(program_address, device_addr);
 
-      // TODO: update RuntimeOperationH2D
-      // TODO: extend lifetime?
+      // TODO(jni): update RuntimeOperationH2D
+      // TODO(jni): extend lifetime?
       // Create RuntimeOperationH2D to transfer binary to device
       auto h2d_op = std::make_shared<flex::RuntimeOperationH2D>(
           const_cast<void*>(static_cast<const void*>(binary_data.data())),
@@ -401,7 +405,8 @@ std::unique_ptr<JobPlan> PrepareKernel(
       spyrecode_json["JobPreparationPlan"], spyrecode_dir_path);
 
   // Extract the CompositeAddress from the allocated DataPtr
-  flex::CompositeAddress program_address = detail::ExtractCompositeAddress(allocated_memory);
+  flex::CompositeAddress program_address =
+      detail::ExtractCompositeAddress(allocated_memory);
 
   if (!spyrecode_json.contains("JobExecPlan") ||
       !spyrecode_json["JobExecPlan"].is_array()) {
