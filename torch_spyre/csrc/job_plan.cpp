@@ -18,6 +18,7 @@
 
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace spyre {
 
