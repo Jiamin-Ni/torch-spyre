@@ -33,8 +33,8 @@ namespace spyre {
  * @brief Represents a single step in a job plan
  *
  * A JobPlanStep pairs a runtime operation with optional host-side computation.
- * When host compute is present, the operation must be a RuntimeOperationHostCallback
- * (or null, to be constructed at launch time).
+ * When host compute is present, the operation must be a
+ * RuntimeOperationHostCallback (or null, to be constructed at launch time).
  *
  * This type is used to build job plans that interleave device operations
  * (compute, data transfers) with host-side operations (program correction,

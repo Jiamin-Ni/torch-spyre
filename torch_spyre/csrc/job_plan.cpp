@@ -21,35 +21,45 @@
 
 namespace spyre {
 
-JobPlan::JobPlan() : steps_(), expected_input_shapes_() {}
+JobPlan::JobPlan() : steps_(), expected_input_shapes_(), program_memory_() {}
 
 JobPlan::JobPlan(const std::vector<JobPlanStep>& steps)
-    : steps_(steps), expected_input_shapes_() {}
+    : steps_(steps), expected_input_shapes_(), program_memory_() {}
 
 JobPlan::JobPlan(std::vector<JobPlanStep>&& steps)
-    : steps_(std::move(steps)), expected_input_shapes_() {}
+    : steps_(std::move(steps)), expected_input_shapes_(), program_memory_() {}
 
 JobPlan::JobPlan(const std::vector<JobPlanStep>& steps,
                  const std::vector<std::vector<int64_t>>& expected_input_shapes)
-    : steps_(steps), expected_input_shapes_(expected_input_shapes) {}
+    : steps_(steps),
+      expected_input_shapes_(expected_input_shapes),
+      program_memory_() {}
 
 JobPlan::JobPlan(std::vector<JobPlanStep>&& steps,
                  std::vector<std::vector<int64_t>>&& expected_input_shapes)
     : steps_(std::move(steps)),
-      expected_input_shapes_(std::move(expected_input_shapes)) {}
+      expected_input_shapes_(std::move(expected_input_shapes)),
+      program_memory_() {}
 
 JobPlan::JobPlan(const JobPlan& other)
     : steps_(other.steps_),
-      expected_input_shapes_(other.expected_input_shapes_) {}
+      expected_input_shapes_(other.expected_input_shapes_),
+      program_memory_() {
+  // Note: program_memory_ is not copied as c10::DataPtr is move-only
+  // Each JobPlan instance should manage its own program memory
+}
 
 JobPlan::JobPlan(JobPlan&& other) noexcept
     : steps_(std::move(other.steps_)),
-      expected_input_shapes_(std::move(other.expected_input_shapes_)) {}
+      expected_input_shapes_(std::move(other.expected_input_shapes_)),
+      program_memory_(std::move(other.program_memory_)) {}
 
 JobPlan& JobPlan::operator=(const JobPlan& other) {
   if (this != &other) {
     steps_ = other.steps_;
     expected_input_shapes_ = other.expected_input_shapes_;
+    // Note: program_memory_ is not copied as c10::DataPtr is move-only
+    // The existing program_memory_ is retained
   }
   return *this;
 }
@@ -58,13 +68,16 @@ JobPlan& JobPlan::operator=(JobPlan&& other) noexcept {
   if (this != &other) {
     steps_ = std::move(other.steps_);
     expected_input_shapes_ = std::move(other.expected_input_shapes_);
+    program_memory_ = std::move(other.program_memory_);
   }
   return *this;
 }
 
 JobPlan::~JobPlan() = default;
 
-const std::vector<JobPlanStep>& JobPlan::getSteps() const { return steps_; }
+const std::vector<JobPlanStep>& JobPlan::getSteps() const {
+  return steps_;
+}
 
 void JobPlan::setSteps(const std::vector<JobPlanStep>& steps) {
   steps_ = steps;
@@ -93,9 +106,13 @@ void JobPlan::setExpectedInputShapes(
   expected_input_shapes_ = std::move(shapes);
 }
 
-size_t JobPlan::getStepCount() const { return steps_.size(); }
+size_t JobPlan::getStepCount() const {
+  return steps_.size();
+}
 
-bool JobPlan::isEmpty() const { return steps_.empty(); }
+bool JobPlan::isEmpty() const {
+  return steps_.empty();
+}
 
 const JobPlanStep& JobPlan::getStep(size_t index) const {
   if (index >= steps_.size()) {
@@ -111,17 +128,25 @@ JobPlanStep& JobPlan::getStep(size_t index) {
   return steps_[index];
 }
 
-void JobPlan::clearSteps() { steps_.clear(); }
+void JobPlan::clearSteps() {
+  steps_.clear();
+}
 
-void JobPlan::clearExpectedInputShapes() { expected_input_shapes_.clear(); }
+void JobPlan::clearExpectedInputShapes() {
+  expected_input_shapes_.clear();
+}
 
-std::vector<JobPlanStep>::iterator JobPlan::begin() { return steps_.begin(); }
+std::vector<JobPlanStep>::iterator JobPlan::begin() {
+  return steps_.begin();
+}
 
 std::vector<JobPlanStep>::const_iterator JobPlan::begin() const {
   return steps_.begin();
 }
 
-std::vector<JobPlanStep>::iterator JobPlan::end() { return steps_.end(); }
+std::vector<JobPlanStep>::iterator JobPlan::end() {
+  return steps_.end();
+}
 
 std::vector<JobPlanStep>::const_iterator JobPlan::end() const {
   return steps_.end();
@@ -133,6 +158,14 @@ std::vector<JobPlanStep>::const_iterator JobPlan::cbegin() const {
 
 std::vector<JobPlanStep>::const_iterator JobPlan::cend() const {
   return steps_.cend();
+}
+
+void JobPlan::setProgramMemory(c10::DataPtr program_memory) {
+  program_memory_ = std::move(program_memory);
+}
+
+const c10::DataPtr& JobPlan::getProgramMemory() const {
+  return program_memory_;
 }
 
 }  // namespace spyre

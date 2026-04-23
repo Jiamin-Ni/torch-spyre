@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <c10/core/Allocator.h>
+
 #include <cstddef>
 #include <vector>
 
@@ -58,7 +60,8 @@ class JobPlan {
   explicit JobPlan(std::vector<JobPlanStep>&& steps);
 
   /**
-   * @brief Construct a JobPlan with steps and expected input shapes (lvalue overload)
+   * @brief Construct a JobPlan with steps and expected input shapes (lvalue
+   * overload)
    *
    * @param steps Vector of JobPlanStep objects defining the execution sequence
    * @param expected_input_shapes Vector of shape vectors, one per kernel input
@@ -67,7 +70,8 @@ class JobPlan {
           const std::vector<std::vector<int64_t>>& expected_input_shapes);
 
   /**
-   * @brief Construct a JobPlan with steps and expected input shapes (rvalue overload)
+   * @brief Construct a JobPlan with steps and expected input shapes (rvalue
+   * overload)
    *
    * @param steps Vector of JobPlanStep objects defining the execution sequence
    * @param expected_input_shapes Vector of shape vectors, one per kernel input
@@ -218,9 +222,26 @@ class JobPlan {
    */
   std::vector<JobPlanStep>::const_iterator cend() const;
 
+  /**
+   * @brief Set the program memory allocation
+   *
+   * Stores the DataPtr holding the compiled program on device memory.
+   * This keeps the program memory alive for the lifetime of the JobPlan.
+   *
+   * @param program_memory DataPtr holding the compiled program on device
+   */
+  void setProgramMemory(c10::DataPtr program_memory);
+
+  /**
+   * @brief Get the program memory allocation
+   * @return Const reference to the program memory DataPtr
+   */
+  const c10::DataPtr& getProgramMemory() const;
+
  private:
   std::vector<JobPlanStep> steps_;
   std::vector<std::vector<int64_t>> expected_input_shapes_;
+  c10::DataPtr program_memory_;
 };
 
 }  // namespace spyre

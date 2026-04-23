@@ -41,13 +41,14 @@ struct HostComputeMetadata {
  * correction, collectives, and other host computations that need to be
  * executed as part of a job plan.
  *
- * @param metadata Reference to operation-specific metadata (contains buffer sizes)
+ * @param metadata Reference to operation-specific metadata (contains buffer
+ * sizes)
  * @param input_buffer Pointer to input buffer containing source data
  * @param output_buffer Pointer to output buffer for results
  */
-using HostComputeFunction = std::function<void(
-    const HostComputeMetadata& metadata, const void* input_buffer,
-    void* output_buffer)>;
+using HostComputeFunction =
+    std::function<void(const HostComputeMetadata& metadata,
+                       const void* input_buffer, void* output_buffer)>;
 
 /**
  * @brief Represents host-side computation metadata within a JobPlanStep
