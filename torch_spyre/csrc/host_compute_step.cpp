@@ -19,6 +19,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "memory"
+
 namespace spyre {
 
 HostComputeStep::HostComputeStep()

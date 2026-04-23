@@ -16,6 +16,7 @@
 
 #include "job_plan_step.h"
 
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
