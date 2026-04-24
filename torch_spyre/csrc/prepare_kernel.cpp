@@ -29,32 +29,14 @@
 #include "common/json.hpp"
 #include "flex/allocator/alloc_address.hpp"
 #include "flex/allocator/flex_allocator.hpp"
-#include "flex/runtime_stream/runtime_operation.hpp"
-#include "flex/runtime_stream/runtime_stream.hpp"
 #include "host_compute_step.h"
 #include "job_plan_step.h"
+#include "module.h"
 #include "spyre_allocator.h"
-
-// Forward declarations
-namespace flex {
-class RuntimeStream;
-class RuntimeEntry {
- public:
-  RuntimeStream* getDefaultStream(int device_id) const;
-};
-}  // namespace flex
 
 namespace spyre {
 
-// External linkage to GlobalRuntime accessor from module.cpp.
-std::shared_ptr<flex::RuntimeEntry>& getGlobalRuntimeInstance();
-
 namespace detail {
-
-// Helper to get the global runtime
-static std::shared_ptr<flex::RuntimeEntry> getGlobalRuntime() {
-  return getGlobalRuntimeInstance();
-}
 
 static uint64_t prog_dev_ptr = 0;
 
@@ -318,7 +300,8 @@ c10::DataPtr ExecuteJobPreparationPlan(
           program_address);
 
       // Get the default stream and launch the operation
-      auto runtime = getGlobalRuntime();
+      // TODO(jni): launch through SpyreStream
+      auto runtime = GlobalRuntime::get();
       if (!runtime) {
         throw std::runtime_error("GlobalRuntime not initialized");
       }
