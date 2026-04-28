@@ -16,13 +16,14 @@
 
 #pragma once
 
-#include <flex/allocator/alloc_address.hpp>
 #include <torch/types.h>
+
 #include <cstdint>
+#include <flex/allocator/alloc_address.hpp>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
-
 
 // Forward declarations for flex types
 namespace flex {
@@ -114,14 +115,18 @@ class JobPlanStep {
    *
    * @param enable True to enable pipeline barrier, false to disable
    */
-  void setPipelineBarrier(bool enable) { pipeline_barrier_ = enable; }
+  void setPipelineBarrier(bool enable) {
+    pipeline_barrier_ = enable;
+  }
 
   /**
    * @brief Get the pipeline barrier setting for this step
    *
    * @return True if pipeline barrier is enabled, false otherwise
    */
-  bool getPipelineBarrier() const { return pipeline_barrier_; }
+  bool getPipelineBarrier() const {
+    return pipeline_barrier_;
+  }
 
  protected:
   bool pipeline_barrier_ = false;
@@ -134,11 +139,10 @@ class JobPlanStep {
  * RuntimeOperationH2D.
  *
  * When used for correction tensor DMA, the host_address points into a pinned
- * host buffer allocated during PrepareKernel and shared (via
- * std::shared_ptr<void>) with the JobPlanStepHostCompute that writes into it.
- * The buffer is allocated once and reused across launches — FIFO ordering
- * within a stream guarantees the HostCompute callback writes the buffer before
- * the H2D reads it.
+ * host buffer allocated during PrepareKernel and shared with the
+ * JobPlanStepHostCompute that writes into it. The buffer is allocated once and
+ * reused across launches — FIFO ordering within a stream guarantees the
+ * HostCompute callback writes the buffer before the H2D reads it.
  */
 class JobPlanStepH2D final : public JobPlanStep {
  public:
@@ -219,7 +223,7 @@ class JobPlanStepCompute final : public JobPlanStep {
  * maps it to the corresponding built-in HostComputeFunction during SpyreCode
  * translation.
  *
- * The output buffer is a std::shared_ptr<void> to pinned host memory, shared
+ * The output buffer is a pointer to pinned host memory, shared
  * with the subsequent JobPlanStepH2D that transfers it to device. construct()
  * builds a closure capturing the function, metadata, composite addresses, and
  * the buffer, and produces a RuntimeOperationHostCallback.
@@ -331,7 +335,9 @@ struct JobPlan {
    *
    * @return Mutable reference to the steps vector
    */
-  std::vector<std::unique_ptr<JobPlanStep>>& getSteps() { return steps; }
+  std::vector<std::unique_ptr<JobPlanStep>>& getSteps() {
+    return steps;
+  }
 
   /**
    * @brief Set the steps vector by moving
