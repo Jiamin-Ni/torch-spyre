@@ -16,232 +16,366 @@
 
 #pragma once
 
-#include <c10/core/Allocator.h>
-
-#include <cstddef>
+#include <flex/allocator/alloc_address.hpp>
+#include <torch/types.h>
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <vector>
 
-#include "job_plan_step.h"
+
+// Forward declarations for flex types
+namespace flex {
+class RuntimeOperation;
+}
 
 namespace spyre {
 
 /**
- * @brief Represents a complete execution plan for a job
+ * @brief Base class for host compute operation metadata
  *
- * A JobPlan defines the top-level execution plan with ordered steps and
- * expected input shapes. It contains a sequence of JobPlanStep objects that
- * will be executed in order, along with metadata about the expected input
- * tensor shapes for each kernel input.
- *
- * Empty plans are supported for DMA-only operations that don't require
- * computation steps.
+ * This polymorphic base class allows different host compute operations
+ * to define their own metadata structures while maintaining type safety
+ * and avoiding JSON parsing overhead.
  */
-class JobPlan {
+struct HostComputeMetadata {
+  virtual ~HostComputeMetadata() = default;
+};
+
+/**
+ * @brief Function type for host-side computation operations
+ *
+ * This callable type represents host-side operations such as program
+ * correction, collectives, and other host computations that need to be
+ * executed as part of a job plan.
+ *
+ * @param metadata Reference to operation-specific metadata (contains buffer
+ * sizes)
+ * @param input_buffer Pointer to input buffer containing source data
+ * @param output_buffer Pointer to output buffer for results
+ */
+using HostComputeFunction =
+    std::function<void(const HostComputeMetadata& metadata,
+                       const void* input_buffer, void* output_buffer)>;
+
+/**
+ * @brief Context passed to JobPlanStep::construct() at launch time
+ *
+ * Carries runtime data available at LaunchKernel time that was not available
+ * during PrepareKernel. Constructed per-launch (or per-tile-iteration in tiled
+ * execution) by SpyreStream.
+ */
+struct LaunchContext {
+  /**
+   * @brief CompositeAddress values extracted from caller's SpyreTensor list
+   *
+   * Corresponds to the kernel's I/O (order matches SpyreCode tensor list).
+   * For tiled execution, these are the offset-adjusted addresses for the
+   * current tile iteration.
+   */
+  const std::vector<const flex::CompositeAddress*> composite_addresses;
+};
+
+/**
+ * @brief Polymorphic base class for JobPlan steps
+ *
+ * Each concrete subclass holds metadata resolved during PrepareKernel and
+ * implements construct() to produce a RuntimeOperation at LaunchKernel time.
+ * This factory method pattern eliminates special-case branching in
+ * SpyreStream::Launch.
+ *
+ * All RuntimeOperation objects are transient: constructed inside construct(),
+ * ownership transferred to RuntimeStream via launchOperation(), and destroyed
+ * when the stream completes the operation. No RuntimeOperation is cached in
+ * the JobPlan.
+ */
+class JobPlanStep {
+ public:
+  virtual ~JobPlanStep() = default;
+
+  /**
+   * @brief Construct a RuntimeOperation for this step
+   *
+   * Called by SpyreStream during LaunchKernel. Produces a fully-populated
+   * RuntimeOperation using metadata stored during PrepareKernel and runtime
+   * data from the LaunchContext.
+   *
+   * @param ctx Launch context containing composite addresses
+   * @return Unique pointer to the constructed RuntimeOperation
+   */
+  virtual std::unique_ptr<flex::RuntimeOperation> construct(
+      LaunchContext& ctx) const = 0;
+
+  /**
+   * @brief Enable or disable pipeline barrier for this step
+   *
+   * Pipeline barriers control operation ordering within a stream. When enabled,
+   * the operation waits for all prior operations to complete before starting.
+   *
+   * @param enable True to enable pipeline barrier, false to disable
+   */
+  void setPipelineBarrier(bool enable) { pipeline_barrier_ = enable; }
+
+  /**
+   * @brief Get the pipeline barrier setting for this step
+   *
+   * @return True if pipeline barrier is enabled, false otherwise
+   */
+  bool getPipelineBarrier() const { return pipeline_barrier_; }
+
+ protected:
+  bool pipeline_barrier_ = false;
+};
+
+/**
+ * @brief Host-to-device transfer step
+ *
+ * All fields resolved during PrepareKernel. construct() produces a
+ * RuntimeOperationH2D.
+ *
+ * When used for correction tensor DMA, the host_address points into a pinned
+ * host buffer allocated during PrepareKernel and shared (via
+ * std::shared_ptr<void>) with the JobPlanStepHostCompute that writes into it.
+ * The buffer is allocated once and reused across launches — FIFO ordering
+ * within a stream guarantees the HostCompute callback writes the buffer before
+ * the H2D reads it.
+ */
+class JobPlanStepH2D final : public JobPlanStep {
  public:
   /**
-   * @brief Default constructor
+   * @brief Construct H2D step with raw host pointer
    *
-   * Creates an empty JobPlan with no steps and no expected input shapes.
+   * @param host_address Host memory address (lifetime managed by JobPlan)
+   * @param device_address Device memory address
    */
-  JobPlan();
+  JobPlanStepH2D(void* host_address, flex::CompositeAddress device_address)
+      : host_address_(host_address),
+        device_address_(std::move(device_address)) {}
 
-  /**
-   * @brief Construct a JobPlan with steps (lvalue overload)
-   *
-   * @param steps Vector of JobPlanStep objects defining the execution sequence
-   */
-  explicit JobPlan(const std::vector<JobPlanStep>& steps);
-
-  /**
-   * @brief Construct a JobPlan with steps (rvalue overload)
-   *
-   * @param steps Vector of JobPlanStep objects defining the execution sequence
-   */
-  explicit JobPlan(std::vector<JobPlanStep>&& steps);
-
-  /**
-   * @brief Construct a JobPlan with steps and expected input shapes (lvalue
-   * overload)
-   *
-   * @param steps Vector of JobPlanStep objects defining the execution sequence
-   * @param expected_input_shapes Vector of shape vectors, one per kernel input
-   */
-  JobPlan(const std::vector<JobPlanStep>& steps,
-          const std::vector<std::vector<int64_t>>& expected_input_shapes);
-
-  /**
-   * @brief Construct a JobPlan with steps and expected input shapes (rvalue
-   * overload)
-   *
-   * @param steps Vector of JobPlanStep objects defining the execution sequence
-   * @param expected_input_shapes Vector of shape vectors, one per kernel input
-   */
-  JobPlan(std::vector<JobPlanStep>&& steps,
-          std::vector<std::vector<int64_t>>&& expected_input_shapes);
-
-  /**
-   * @brief Copy constructor
-   */
-  JobPlan(const JobPlan& other);
-
-  /**
-   * @brief Move constructor
-   */
-  JobPlan(JobPlan&& other) noexcept;
-
-  /**
-   * @brief Copy assignment operator
-   */
-  JobPlan& operator=(const JobPlan& other);
-
-  /**
-   * @brief Move assignment operator
-   */
-  JobPlan& operator=(JobPlan&& other) noexcept;
-
-  /**
-   * @brief Destructor
-   */
-  ~JobPlan();
-
-  /**
-   * @brief Get the vector of steps
-   * @return Const reference to the steps vector
-   */
-  const std::vector<JobPlanStep>& getSteps() const;
-
-  /**
-   * @brief Set the vector of steps (lvalue overload)
-   * @param steps Vector of JobPlanStep objects
-   */
-  void setSteps(const std::vector<JobPlanStep>& steps);
-
-  /**
-   * @brief Set the vector of steps (rvalue overload)
-   * @param steps Vector of JobPlanStep objects
-   */
-  void setSteps(std::vector<JobPlanStep>&& steps);
-
-  /**
-   * @brief Add a step to the end of the plan
-   * @param step The JobPlanStep to add
-   */
-  void addStep(JobPlanStep step);
-
-  /**
-   * @brief Get the expected input shapes
-   * @return Const reference to the expected input shapes vector
-   */
-  const std::vector<std::vector<int64_t>>& getExpectedInputShapes() const;
-
-  /**
-   * @brief Set the expected input shapes (lvalue overload)
-   * @param shapes Vector of shape vectors, one per kernel input
-   */
-  void setExpectedInputShapes(const std::vector<std::vector<int64_t>>& shapes);
-
-  /**
-   * @brief Set the expected input shapes (rvalue overload)
-   * @param shapes Vector of shape vectors, one per kernel input
-   */
-  void setExpectedInputShapes(std::vector<std::vector<int64_t>>&& shapes);
-
-  /**
-   * @brief Get the number of steps in the plan
-   * @return Number of steps
-   */
-  size_t getStepCount() const;
-
-  /**
-   * @brief Check if the plan is empty (has no steps)
-   * @return true if plan has no steps, false otherwise
-   */
-  bool isEmpty() const;
-
-  /**
-   * @brief Get a step by index
-   *
-   * @param index Index of the step to retrieve
-   * @return Const reference to the JobPlanStep at the given index
-   * @throws std::out_of_range if index is out of bounds
-   */
-  const JobPlanStep& getStep(size_t index) const;
-
-  /**
-   * @brief Get a mutable step by index
-   *
-   * @param index Index of the step to retrieve
-   * @return Reference to the JobPlanStep at the given index
-   * @throws std::out_of_range if index is out of bounds
-   */
-  JobPlanStep& getStep(size_t index);
-
-  /**
-   * @brief Clear all steps from the plan
-   */
-  void clearSteps();
-
-  /**
-   * @brief Clear the expected input shapes
-   */
-  void clearExpectedInputShapes();
-
-  /**
-   * @brief Iterator support - begin
-   * @return Iterator to the first step
-   */
-  std::vector<JobPlanStep>::iterator begin();
-
-  /**
-   * @brief Iterator support - begin (const)
-   * @return Const iterator to the first step
-   */
-  std::vector<JobPlanStep>::const_iterator begin() const;
-
-  /**
-   * @brief Iterator support - end
-   * @return Iterator to one past the last step
-   */
-  std::vector<JobPlanStep>::iterator end();
-
-  /**
-   * @brief Iterator support - end (const)
-   * @return Const iterator to one past the last step
-   */
-  std::vector<JobPlanStep>::const_iterator end() const;
-
-  /**
-   * @brief Iterator support - cbegin
-   * @return Const iterator to the first step
-   */
-  std::vector<JobPlanStep>::const_iterator cbegin() const;
-
-  /**
-   * @brief Iterator support - cend
-   * @return Const iterator to one past the last step
-   */
-  std::vector<JobPlanStep>::const_iterator cend() const;
-
-  /**
-   * @brief Set the program memory allocation
-   *
-   * Stores the DataPtr holding the compiled program on device memory.
-   * This keeps the program memory alive for the lifetime of the JobPlan.
-   *
-   * @param program_memory DataPtr holding the compiled program on device
-   */
-  void setProgramMemory(c10::DataPtr program_memory);
-
-  /**
-   * @brief Get the program memory allocation
-   * @return Const reference to the program memory DataPtr
-   */
-  const c10::DataPtr& getProgramMemory() const;
+  std::unique_ptr<flex::RuntimeOperation> construct(
+      LaunchContext& ctx) const override;
 
  private:
-  std::vector<JobPlanStep> steps_;
-  std::vector<std::vector<int64_t>> expected_input_shapes_;
-  c10::DataPtr program_memory_;
+  void* host_address_;  // Non-owning pointer (JobPlan owns the buffer)
+  flex::CompositeAddress device_address_;
+};
+
+/**
+ * @brief Device-to-host transfer step
+ *
+ * All fields resolved during PrepareKernel. construct() produces a
+ * RuntimeOperationD2H.
+ */
+class JobPlanStepD2H final : public JobPlanStep {
+ public:
+  /**
+   * @brief Construct D2H step
+   *
+   * @param device_address Device memory address
+   * @param host_address Host memory address (caller manages lifetime)
+   */
+  JobPlanStepD2H(flex::CompositeAddress device_address, void* host_address)
+      : device_address_(std::move(device_address)),
+        host_address_(host_address) {}
+
+  std::unique_ptr<flex::RuntimeOperation> construct(
+      LaunchContext& ctx) const override;
+
+ private:
+  flex::CompositeAddress device_address_;
+  void* host_address_;
+};
+
+/**
+ * @brief Device compute launch step
+ *
+ * Binary address resolved during PrepareKernel. construct() produces a
+ * RuntimeOperationCompute.
+ */
+class JobPlanStepCompute final : public JobPlanStep {
+ public:
+  /**
+   * @brief Construct compute step
+   *
+   * @param binary_address Address of the program binary on device
+   */
+  explicit JobPlanStepCompute(flex::CompositeAddress binary_address)
+      : binary_address_(std::move(binary_address)) {}
+
+  std::unique_ptr<flex::RuntimeOperation> construct(
+      LaunchContext& ctx) const override;
+
+ private:
+  flex::CompositeAddress binary_address_;
+};
+
+/**
+ * @brief Host-side computation step (e.g., program correction)
+ *
+ * The host function, compiler metadata, and a shared output buffer are stored
+ * directly as members during PrepareKernel. The host function (e.g., the
+ * program correction routine) is a predefined runtime function — SpyreCode's
+ * ComputeOnHost command identifies which function to invoke, and torch-spyre
+ * maps it to the corresponding built-in HostComputeFunction during SpyreCode
+ * translation.
+ *
+ * The output buffer is a std::shared_ptr<void> to pinned host memory, shared
+ * with the subsequent JobPlanStepH2D that transfers it to device. construct()
+ * builds a closure capturing the function, metadata, composite addresses, and
+ * the buffer, and produces a RuntimeOperationHostCallback.
+ *
+ * The shared buffer is allocated once during PrepareKernel and reused across
+ * launches. For tiled execution, the same buffer is reused across iterations —
+ * FIFO ordering guarantees each iteration's H2D consumes the buffer before the
+ * next iteration's HostCompute overwrites it.
+ */
+class JobPlanStepHostCompute final : public JobPlanStep {
+ public:
+  /**
+   * @brief Construct host compute step
+   *
+   * @param function Predefined runtime host compute function (e.g., program
+   *                 correction), selected during SpyreCode translation
+   * @param metadata Compiler-provided metadata (e.g., hcm.json / vdci.json
+   *                 describing how symbolic values must be interpreted)
+   * @param output_buffer Pinned host buffer (lifetime managed by JobPlan)
+   */
+  JobPlanStepHostCompute(HostComputeFunction function,
+                         HostComputeMetadata metadata, void* output_buffer)
+      : function_(std::move(function)),
+        metadata_(std::move(metadata)),
+        output_buffer_(output_buffer) {}
+
+  std::unique_ptr<flex::RuntimeOperation> construct(
+      LaunchContext& ctx) const override;
+
+ private:
+  HostComputeFunction function_;
+  HostComputeMetadata metadata_;
+  void* output_buffer_;  // Non-owning pointer (JobPlan owns the buffer)
+};
+
+/**
+ * @brief Specializes a resident kernel using composite addresses
+ *
+ * Binary address resolved during PrepareKernel; tensor input/output addresses
+ * extracted from ctx.composite_addresses during construct(). Produces a
+ * RuntimeOperationComputeSpecializeResident.
+ */
+class JobPlanStepComputeSpecialize final : public JobPlanStep {
+ public:
+  /**
+   * @brief Construct compute specialize step
+   *
+   * @param binary_address Address of the resident program binary on device
+   */
+  explicit JobPlanStepComputeSpecialize(flex::CompositeAddress binary_address)
+      : binary_address_(std::move(binary_address)) {}
+
+  std::unique_ptr<flex::RuntimeOperation> construct(
+      LaunchContext& ctx) const override;
+
+ private:
+  flex::CompositeAddress binary_address_;
+};
+
+/**
+ * @brief A torch-spyre internal container for executing a unit of work
+ *
+ * A JobPlan bundles everything needed to execute a unit of work on a stream.
+ * It is produced by translating a SpyreCode's Job Execution Plan after the Job
+ * Preparation Plan has been executed. flex never sees a JobPlan — SpyreStream
+ * extracts the operations and submits them to RuntimeStream.launchOperation()
+ * as a vector<RuntimeOperation>.
+ *
+ * A JobPlan is self-contained: if a compute requires program correction, the
+ * correction callback, the correction tensor DMA, and the device compute are
+ * all separate steps in the same JobPlan. For pure data movement (e.g., tensor
+ * .to(device) or binary loading), a JobPlan with only DMA steps is used.
+ *
+ * Producers:
+ * - Backend compiler (deeptools) via torch-spyre: Deeptools produces a
+ *   SpyreCode JSON per SDSC. torch-spyre translates the SpyreCode into a
+ *   JobPlan — executing the Job Preparation Plan (allocations, binary loading)
+ *   and translating the Job Execution Plan into JobPlanStep entries with
+ *   resolved CompositeAddress values. A single torch.compile call may produce
+ *   multiple SDSCs, resulting in multiple JobPlans.
+ * - Communications libraries: Create JobPlans for inter-device data transfers,
+ *   collective operations, or other multi-step communication patterns.
+ * - torch-spyre: Assembles JobPlans for tensor .to(device) moves (single
+ *   RuntimeOperationH2D step), tensor .to("cpu") readbacks (single
+ *   RuntimeOperationD2H step), or any other sequence of operations it needs to
+ *   containerize.
+ */
+struct JobPlan {
+  /**
+   * @brief Ordered sequence of steps
+   *
+   * During LaunchKernel, SpyreStream calls construct(ctx) on each step in
+   * order, collecting the resulting RuntimeOperations, then submits them to
+   * RuntimeStream.
+   */
+  std::vector<std::unique_ptr<JobPlanStep>> steps;
+
+  /**
+   * @brief Get the steps vector
+   *
+   * @return Const reference to the steps vector
+   */
+  const std::vector<std::unique_ptr<JobPlanStep>>& getSteps() const {
+    return steps;
+  }
+
+  /**
+   * @brief Get mutable reference to the steps vector
+   *
+   * @return Mutable reference to the steps vector
+   */
+  std::vector<std::unique_ptr<JobPlanStep>>& getSteps() { return steps; }
+
+  /**
+   * @brief Set the steps vector by moving
+   *
+   * @param new_steps Vector of steps to move into this JobPlan
+   */
+  void setSteps(std::vector<std::unique_ptr<JobPlanStep>> new_steps) {
+    steps = std::move(new_steps);
+  }
+
+  /**
+   * @brief Compiled tile dimensions from SpyreCode
+   *
+   * One entry per kernel input tensor. Used by SpyreStream for tiling
+   * detection. Empty for pure DMA JobPlans (e.g., tensor .to(device)).
+   */
+  std::vector<std::vector<int64_t>> expected_input_shapes;
+
+  /**
+   * @brief Owning CompositeAddress of the program binary
+   *
+   * Stores the device address of the compiled program binary. The JobPlan
+   * owns this address and is responsible for its lifetime. When the JobPlan
+   * is destroyed, the binary memory is freed.
+   *
+   * Set during PrepareKernel when the binary is loaded to device memory.
+   * Empty for pure DMA JobPlans (e.g., tensor .to(device)) that don't
+   * involve compute operations.
+   */
+  flex::CompositeAddress binary_address;
+
+  /**
+   * @brief Pinned host buffers owned by this JobPlan
+   *
+   * Stores pinned memory buffers (e.g., for correction tensors) that must
+   * remain alive for the lifetime of the JobPlan. Steps reference these
+   * buffers via raw pointers. Buffers are automatically freed when JobPlan
+   * is destroyed.
+   *
+   * Allocated using torch::empty() with .pinned_memory(true) during
+   * PrepareKernel. The pinned memory ensures efficient DMA transfers and
+   * prevents OS from swapping pages to disk.
+   */
+  std::vector<torch::Tensor> pinned_buffers;
 };
 
 }  // namespace spyre
