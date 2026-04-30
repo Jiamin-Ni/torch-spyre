@@ -56,8 +56,8 @@ struct HostComputeMetadata {
  * @param output_buffer Pointer to output buffer for results
  */
 using HostComputeFunction =
-    std::function<void(const HostComputeMetadata& metadata,
-                       const void* input_buffer, void* output_buffer)>;
+    std::function<void(HostComputeMetadata* metadata, void* output_buffer,
+                       const void* input_buffer)>;
 
 /**
  * @brief Context passed to JobPlanStep::construct() at launch time
@@ -74,7 +74,8 @@ struct LaunchContext {
    * For tiled execution, these are the offset-adjusted addresses for the
    * current tile iteration.
    */
-  const std::vector<const flex::CompositeAddress*> composite_addresses;
+  // const std::vector<const flex::CompositeAddress*> composite_addresses;
+  const std::vector<at::Tensor>& inputs_outputs;
 };
 
 /**
@@ -245,7 +246,8 @@ class JobPlanStepHostCompute final : public JobPlanStep {
    * @param output_buffer Pinned host buffer (lifetime managed by JobPlan)
    */
   JobPlanStepHostCompute(HostComputeFunction function,
-                         HostComputeMetadata metadata, void* output_buffer)
+                         std::unique_ptr<HostComputeMetadata> metadata,
+                         void* output_buffer)
       : function_(std::move(function)),
         metadata_(std::move(metadata)),
         output_buffer_(output_buffer) {}
@@ -255,7 +257,7 @@ class JobPlanStepHostCompute final : public JobPlanStep {
 
  private:
   HostComputeFunction function_;
-  HostComputeMetadata metadata_;
+  std::unique_ptr<HostComputeMetadata> metadata_;
   void* output_buffer_;  // Non-owning pointer (JobPlan owns the buffer)
 };
 
@@ -331,15 +333,6 @@ struct JobPlan {
   }
 
   /**
-   * @brief Get mutable reference to the steps vector
-   *
-   * @return Mutable reference to the steps vector
-   */
-  std::vector<std::unique_ptr<JobPlanStep>>& getSteps() {
-    return steps;
-  }
-
-  /**
    * @brief Set the steps vector by moving
    *
    * @param new_steps Vector of steps to move into this JobPlan
@@ -367,7 +360,7 @@ struct JobPlan {
    * Empty for pure DMA JobPlans (e.g., tensor .to(device)) that don't
    * involve compute operations.
    */
-  flex::CompositeAddress binary_address;
+  flex::CompositeAddress job_allocation;
 
   /**
    * @brief Pinned host buffers owned by this JobPlan

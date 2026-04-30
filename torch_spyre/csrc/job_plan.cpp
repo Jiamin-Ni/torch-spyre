@@ -19,8 +19,11 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
+#include "flex/allocator/alloc_address.hpp"
 #include "flex/runtime_stream/runtime_operation.hpp"
+#include "spyre_allocator.h"
 
 namespace spyre {
 
@@ -47,10 +50,32 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
   return op;
 }
 
+// constexpr int64_t SegmentSize = 16LL * 1024 * 1024 * 1024;
+
+// convert CompositeAddress to address that host compute function expects
+int64_t convert_address(flex::CompositeAddress& composite_address) {
+  size_t num_chunks = composite_address.chunks().size();
+  TORCH_CHECK(num_chunks == 1, "Interleaved not supported yet");
+
+  // TODO(jni): update once resolved on flex support
+  // const auto& addr = composite_address.chunks().at(0).addr;
+  // int64_t address = addr.segment_id * SegmentSize + addr.offset;
+  int64_t address = 0;
+  return address;
+}
+
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
     LaunchContext& ctx) const {
-  auto callback = [this, composite_addresses = ctx.composite_addresses](void*) {
-    function_(metadata_, composite_addresses.data(), output_buffer_);
+  std::vector<int64_t> addresses(ctx.inputs_outputs.size());
+  int addr_idx = 0;
+  for (auto& tensor : ctx.inputs_outputs) {
+    int64_t addr = convert_address(
+        (static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
+             ->composite_addr));
+    addresses[addr_idx++] = addr;
+  }
+  auto callback = [this, addresses](void*) {
+    function_(metadata_.get(), output_buffer_, &addresses);
   };
 
   auto op = std::make_unique<flex::RuntimeOperationHostCallback>(
@@ -59,13 +84,21 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
   return op;
 }
 
-std::unique_ptr<flex::RuntimeOperation> JobPlanStepComputeSpecialize::construct(
-    LaunchContext& ctx) const {
-  // TODO(jni): to be added once flex PR merged
-  throw std::runtime_error(
-      "JobPlanStepComputeSpecialize::construct is not implemented: "
-      "flex runtime does not provide RuntimeOperationComputeSpecializeResident "
-      "in the current API");
-}
+// TODO(jni): to be added once flex PR merged
+// std::unique_ptr<flex::RuntimeOperation>
+// JobPlanStepComputeSpecialize::construct(
+//     LaunchContext& ctx) const {
+//   std::vector<flex::CompositeAddress*> inp;
+//   for (auto& tensor : ctx.inputs_outputs) {
+//     flex::CompositeAddress* address = &(
+//         static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
+//             ->composite_addr);
+//     inp.push_back((address));
+//   }
+//   auto op =
+//   std::make_unique<flex::RuntimeOperationComputeSpecializeResident>(
+//       &binary_address_, inp);
+//   return op;
+// }
 
 }  // namespace spyre
