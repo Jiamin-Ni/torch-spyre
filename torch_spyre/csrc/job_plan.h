@@ -63,18 +63,13 @@ using HostComputeFunction =
  * @brief Context passed to JobPlanStep::construct() at launch time
  *
  * Carries runtime data available at LaunchKernel time that was not available
- * during PrepareKernel. Constructed per-launch (or per-tile-iteration in tiled
- * execution) by SpyreStream.
+ * during PrepareKernel.
  */
 struct LaunchContext {
   /**
-   * @brief CompositeAddress values extracted from caller's SpyreTensor list
+   * @brief at::Tensor list of inputs and outputs
    *
-   * Corresponds to the kernel's I/O (order matches SpyreCode tensor list).
-   * For tiled execution, these are the offset-adjusted addresses for the
-   * current tile iteration.
    */
-  // const std::vector<const flex::CompositeAddress*> composite_addresses;
   const std::vector<at::Tensor>& inputs_outputs;
 };
 
