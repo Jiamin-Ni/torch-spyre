@@ -60,8 +60,10 @@ int64_t convert_address(flex::CompositeAddress& composite_address) {
   // TODO(jni): update once resolved on flex support
   // const auto& addr = composite_address.chunks().at(0).addr;
   // int64_t address = addr.segment_id * SegmentSize + addr.offset;
-  int64_t address = 0;
-  return address;
+
+  TORCH_CHECK(false,
+              "convert_address not yet implemented - waiting for flex support");
+  return 0;
 }
 
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(

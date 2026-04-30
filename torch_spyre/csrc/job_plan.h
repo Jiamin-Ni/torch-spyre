@@ -319,24 +319,6 @@ struct JobPlan {
   std::vector<std::unique_ptr<JobPlanStep>> steps;
 
   /**
-   * @brief Get the steps vector
-   *
-   * @return Const reference to the steps vector
-   */
-  const std::vector<std::unique_ptr<JobPlanStep>>& getSteps() const {
-    return steps;
-  }
-
-  /**
-   * @brief Set the steps vector by moving
-   *
-   * @param new_steps Vector of steps to move into this JobPlan
-   */
-  void setSteps(std::vector<std::unique_ptr<JobPlanStep>> new_steps) {
-    steps = std::move(new_steps);
-  }
-
-  /**
    * @brief Compiled tile dimensions from SpyreCode
    *
    * One entry per kernel input tensor. Used by SpyreStream for tiling
@@ -345,15 +327,15 @@ struct JobPlan {
   std::vector<std::vector<int64_t>> expected_input_shapes;
 
   /**
-   * @brief Owning CompositeAddress of the program binary
+   * @brief Owning CompositeAddress of the program binary, and conditionally
+   * program correction data and spillover tensor data
    *
-   * Stores the device address of the compiled program binary. The JobPlan
-   * owns this address and is responsible for its lifetime. When the JobPlan
-   * is destroyed, the binary memory is freed.
+   * The JobPlan owns this address and is responsible for its lifetime. When the
+   * JobPlan is destroyed, the memory is freed.
    *
-   * Set during PrepareKernel when the binary is loaded to device memory.
-   * Empty for pure DMA JobPlans (e.g., tensor .to(device)) that don't
-   * involve compute operations.
+   * Set during PrepareKernel when it's loaded to device memory. Empty for pure
+   * DMA JobPlans (e.g., tensor .to(device)) that don't involve compute
+   * operations.
    */
   flex::CompositeAddress job_allocation;
 
