@@ -30,7 +30,6 @@ from torch._inductor.utils import IndentedBuffer, sympy_subs
 from torch._inductor.virtualized import V
 
 from .constants import (
-    MATMUL_REDUCTION_OP,
     SPYRE_FP32_OPS,
     BATCH_MATMUL_OP,
     IDENTITY_OP,
@@ -195,6 +194,10 @@ class SpyreOpFuncs:
     @staticmethod
     def log(x):
         return PointwiseOp("log", [x])
+
+    @staticmethod
+    def logical_and(x, y):
+        return PointwiseOp("mul", [x, y])
 
     @staticmethod
     def lt(a, b):
@@ -544,7 +547,7 @@ class SpyreKernel(Kernel[CSEVariable]):
                 f"device_size={list(layout.device_layout.device_size)}, op_info={op_info}"
             )
 
-        if value.op == MATMUL_REDUCTION_OP or value.op == BATCH_MATMUL_OP:
+        if value.op == BATCH_MATMUL_OP:
             if (
                 len(value.arguments) != 2
                 or (not isinstance(value.arguments[0], TensorAccess))
