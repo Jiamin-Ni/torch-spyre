@@ -84,21 +84,23 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
   return op;
 }
 
-// TODO(jni): to be added once flex PR merged
-// std::unique_ptr<flex::RuntimeOperation>
-// JobPlanStepComputeSpecialize::construct(
-//     LaunchContext& ctx) const {
-//   std::vector<flex::CompositeAddress*> inp;
-//   for (auto& tensor : ctx.inputs_outputs) {
-//     flex::CompositeAddress* address = &(
-//         static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
-//             ->composite_addr);
-//     inp.push_back((address));
-//   }
-//   auto op =
-//   std::make_unique<flex::RuntimeOperationComputeSpecializeResident>(
-//       &binary_address_, inp);
-//   return op;
-// }
+std::unique_ptr<flex::RuntimeOperation> JobPlanStepComputeSpecialize::construct(
+    LaunchContext& ctx) const {
+  std::vector<flex::CompositeAddress*> inp;
+  for (auto& tensor : ctx.inputs_outputs) {
+    flex::CompositeAddress* address = &(
+        static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
+            ->composite_addr);
+    inp.push_back((address));
+  }
+
+  TORCH_CHECK(false, "not yet implemented - waiting for flex PR merge");
+  // TODO(jni): update once flex PR merged
+  // auto op =
+  //    std::make_unique<flex::RuntimeOperationCompute>(&binary_address_, inp);
+  auto op = std::make_unique<flex::RuntimeOperationCompute>(&binary_address_);
+  op->setPipelineBarrier(pipeline_barrier_);
+  return op;
+}
 
 }  // namespace spyre
