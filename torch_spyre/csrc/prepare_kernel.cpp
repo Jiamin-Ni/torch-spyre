@@ -16,21 +16,17 @@
 
 #include "prepare_kernel.h"
 
-#include <algorithm>
 #include <cstdint>
+#include <filesystem>  // NOLINT
 #include <fstream>
 #include <memory>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "common/json.hpp"
-#include "flex/allocator/alloc_address.hpp"
-#include "flex/allocator/flex_allocator.hpp"
-#include "host_compute_step.h"
-#include "job_plan_step.h"
+#include "job_plan.h"
 #include "module.h"
 #include "spyre_allocator.h"
 
@@ -38,339 +34,306 @@ namespace spyre {
 
 namespace detail {
 
-static uint64_t prog_dev_ptr = 0;
+static uint64_t job_allocation_ptr_start = 120259084288;
 
-// Helper to compute CompositeAddress with offset from device_addr for program
+/**
+ * @brief Helper to compute CompositeAddress with offset from device_addr for
+ * program
+ */
 static flex::CompositeAddress ComputeOffsetAddress(
-    const flex::CompositeAddress& program_address, uint64_t device_ptr,
-    size_t size) {
-  // Calculate offset
-  uint64_t offset = device_ptr - prog_dev_ptr;
-
+    const flex::CompositeAddress& job_allocation, uint64_t dev_ptr,
+    size_t size = 0) {
   // Create CompositeAddress using program_address with offset
-  if (program_address.chunks().empty()) {
-    throw std::runtime_error("program_address has no chunks");
+  TORCH_CHECK(job_allocation.chunks().size() == 1,
+              "job_allocation must have 1 chunk");
+
+  // Calculate offset
+  uint64_t offset = dev_ptr - job_allocation_ptr_start;
+  if (size == 0) {
+    size = job_allocation.total_size() - offset;
   }
 
   // Get the first chunk and add offset to its address
-  const auto& base_chunk = program_address.chunks()[0];
+  const auto& base_chunk = job_allocation.chunks()[0];
   flex::LogicalAddress offset_addr(base_chunk.addr.region_id,
                                    base_chunk.addr.offset + offset);
   flex::Chunk offset_chunk(offset_addr, size, base_chunk.domain_id);
   return flex::CompositeAddress(offset_chunk);
 }
 
-// Helper to check if a file exists
+/**
+ * @brief Helper to check if a file exists
+ */
 bool FileExists(const std::filesystem::path& path) {
   return std::filesystem::exists(path) &&
          std::filesystem::is_regular_file(path);
 }
 
-// Helper to read entire file into string
+/**
+ * @brief Helper to read entire file into string
+ */
 std::string ReadFileToString(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
-  if (!file) {
-    throw std::runtime_error("Failed to open file: " + path.string());
-  }
+  TORCH_CHECK(file, "Failed to open file: ", path.string());
 
   std::ostringstream ss;
   ss << file.rdbuf();
   return ss.str();
 }
 
-// Helper to parse metadata JSON if present
-std::vector<std::vector<int64_t>> ParseExpectedInputShapes(
-    const std::filesystem::path& metadata_path) {
-  std::vector<std::vector<int64_t>> shapes;
-
-  if (!FileExists(metadata_path)) {
-    return shapes;  // Return empty if no metadata
-  }
-
-  try {
-    std::string json_str = ReadFileToString(metadata_path);
-    nlohmann::json metadata = nlohmann::json::parse(json_str);
-
-    if (metadata.contains("expected_input_shapes") &&
-        metadata["expected_input_shapes"].is_array()) {
-      for (const auto& shape_array : metadata["expected_input_shapes"]) {
-        std::vector<int64_t> shape;
-        for (const auto& dim : shape_array) {
-          shape.push_back(dim.get<int64_t>());
-        }
-        shapes.push_back(std::move(shape));
-      }
-    }
-  }
-  catch (const std::exception& e) {
-    // Log warning but don't fail - metadata is optional
-    // In production, you might want to use a proper logging framework
-  }
-
-  return shapes;
-}
-
-// Helper to parse a SpyreCode JSON command and create a JobPlanStep
-JobPlanStep ParseSpyreCodeCommand(
+/**
+ * @brief Helper to parse a SpyreCode JSON command and create a JobPlanStep
+ * @param command The JSON command to parse
+ * @param program_address The composite address allocated for the job_allocation
+ */
+std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
     const nlohmann::json& command,
-    const flex::CompositeAddress& program_address) {
-  if (!command.contains("command") || !command["command"].is_string()) {
-    throw std::runtime_error("SpyreCode command missing 'command' field");
-  }
+    const flex::CompositeAddress& job_allocation) {
+  TORCH_CHECK(command.contains("command") && command["command"].is_string(),
+              "SpyreCode command missing 'command' field");
 
   std::string command_type = command["command"].get<std::string>();
   const auto& properties =
       command.contains("properties") ? command["properties"] : nlohmann::json();
 
   if (command_type == "ComputeOnDevice") {
+    TORCH_CHECK(properties.contains("job_bin_ptr"),
+                command_type + " command missing 'job_bin_ptr' property");
+
+    std::string job_bin_ptr_str = properties["dev_ptr"].get<std::string>();
+    uint64_t job_bin_ptr = std::stoull(job_bin_ptr_str);
+
+    auto job_bin_addr = ComputeOffsetAddress(job_allocation, job_bin_ptr);
     // Create RuntimeOperationCompute with the allocated program address
     auto compute_op =
-        std::make_shared<flex::RuntimeOperationCompute>(&program_address);
+        std::make_unique<JobPlanStepComputeSpecialize>(std::move(job_bin_addr));
 
-    return JobPlanStep(compute_op);
+    return compute_op;
 
   } else if (command_type == "ComputeOnHost") {
-    // Create a host compute step
-    // For now, create an empty HostComputeStep as placeholder
-    // metadata to be defined by deeptools
-    HostComputeStep host_step;
-    return JobPlanStep(std::move(host_step));
-
+    // TODO(jni): create JobPlanStepHostCompute
+    TORCH_CHECK(
+        false,
+        "ComputeOnHost not yet implemented - waiting for deeptools PR to "
+        "be merged");
   } else if (command_type == "DataTransfer") {
+    // TODO(jni): create JobPlanStepH2D or JobPlanStepD2H
+    TORCH_CHECK(
+        false,
+        "ComputeOnHost not yet implemented - waiting for deeptools PR to "
+        "be merged");
+
     // Extract direction: 0 = H2D, 1 = D2H
-    if (!properties.contains("direction")) {
-      throw std::runtime_error(
-          "DataTransfer command missing 'direction' property");
-    }
+    TORCH_CHECK(properties.contains("dirn"),
+                "DataTransfer command missing 'dirn' property");
 
-    int direction = properties["direction"].get<int>();
+    std::string dirn_str = properties["dirn"].get<std::string>();
 
-    if (direction == 0) {
+    if (dirn_str == "false") {
       // Host-to-Device transfer
       // Extract host and device addresses
-      if (!properties.contains("dev_ptr")) {
-        throw std::runtime_error("DataTransfer H2D missing 'dev_ptr' property");
-      }
+      TORCH_CHECK(properties.contains("dev_ptr"),
+                  "DataTransfer H2D missing 'dev_ptr' property");
 
-      if (!properties.contains("size")) {
-        throw std::runtime_error("DataTransfer H2D missing 'size' property");
-      }
+      TORCH_CHECK(properties.contains("size"),
+                  "DataTransfer H2D missing 'size' property");
 
       std::string dev_ptr_str = properties["dev_ptr"].get<std::string>();
       std::string size_str = properties["size"].get<std::string>();
 
-      // TODO(jni): indicate which HostCompute the input is from
+      // TODO(jni): host_handle should contain info about the host buffer to be
+      // copied, figure out how and connect host_addr
+      TORCH_CHECK(properties.contains("host_handle"),
+                  "DataTransfer H2D missing 'host_handle' property");
+      std::string host_handle_str =
+          properties["host_handle"].get<std::string>();
       void* host_addr = nullptr;
       uint64_t device_ptr = std::stoull(dev_ptr_str);
       size_t transfer_size = std::stoull(size_str);
 
       // Compute CompositeAddress with offset
       flex::CompositeAddress comp_addr =
-          ComputeOffsetAddress(program_address, device_ptr, transfer_size);
+          ComputeOffsetAddress(job_allocation, device_ptr, transfer_size);
 
       auto h2d_op =
-          std::make_shared<flex::RuntimeOperationH2D>(host_addr, &comp_addr);
-      return JobPlanStep(h2d_op);
+          std::make_unique<JobPlanStepH2D>(host_addr, std::move(comp_addr));
+      return h2d_op;
 
-    } else if (direction == 1) {
+    } else if (dirn_str == "true") {
       // Device-to-Host transfer
       // Extract host and device addresses
-      if (!properties.contains("dev_ptr")) {
-        throw std::runtime_error("DataTransfer D2H missing 'dev_ptr' property");
-      }
+      TORCH_CHECK(properties.contains("dev_ptr"),
+                  "DataTransfer D2H missing 'dev_ptr' property");
 
-      if (!properties.contains("size")) {
-        throw std::runtime_error("DataTransfer D2H missing 'size' property");
-      }
+      TORCH_CHECK(properties.contains("size"),
+                  "DataTransfer D2H missing 'size' property");
 
       std::string dev_ptr_str = properties["dev_ptr"].get<std::string>();
       std::string size_str = properties["size"].get<std::string>();
 
-      // TODO(jni): indicate which HostCompute the output goes to
+      // TODO(jni): host_handle should contain info about the host buffer to be
+      // copied to, figure out how and connect host_addr
+      TORCH_CHECK(properties.contains("host_handle"),
+                  "DataTransfer H2D missing 'host_handle' property");
+      std::string host_handle_str =
+          properties["host_handle"].get<std::string>();
       void* host_addr = nullptr;
       uint64_t device_ptr = std::stoull(dev_ptr_str);
       size_t transfer_size = std::stoull(size_str);
 
       // Compute CompositeAddress with offset from device_addr
       flex::CompositeAddress comp_addr =
-          ComputeOffsetAddress(program_address, device_ptr, transfer_size);
+          ComputeOffsetAddress(job_allocation, device_ptr, transfer_size);
 
       auto d2h_op =
-          std::make_shared<flex::RuntimeOperationD2H>(&comp_addr, host_addr);
-      return JobPlanStep(d2h_op);
+          std::make_unique<JobPlanStepD2H>(std::move(comp_addr), host_addr);
+      return d2h_op;
 
     } else {
-      throw std::runtime_error("Invalid DataTransfer direction: " +
-                               std::to_string(direction));
+      TORCH_CHECK(false, "Invalid DataTransfer direction: ", dirn_str);
     }
 
   } else {
-    throw std::runtime_error("Unknown SpyreCode command type: " + command_type);
+    TORCH_CHECK(false, "Unknown SpyreCode command type: ", command_type);
   }
 }
 
-// Helper to execute Job Preparation Plan
-c10::DataPtr ExecuteJobPreparationPlan(
+/**
+ * @brief Helper to execute Job Preparation Plan
+ * @return CompositeAddress allocated for the job_allocation during preparation
+ */
+flex::CompositeAddress ExecuteJobPreparationPlan(
     const nlohmann::json& job_prep_plan,
     const std::filesystem::path& spyrecode_dir) {
-  if (!job_prep_plan.is_array()) {
-    throw std::runtime_error("JobPreparationPlan must be an array");
-  }
+  TORCH_CHECK(job_prep_plan.is_array() && job_prep_plan.size() == 2,
+              "JobPreparationPlan must be an array with exactly 2 commands "
+              "(Allocate and InitTransfer)");
 
-  c10::DataPtr allocated_ptr;
-  bool found_allocate = false;
-  bool found_init_transfer = false;
+  // Process Allocate command (first item)
+  const auto& allocate_cmd = job_prep_plan[0];
+  TORCH_CHECK(
+      allocate_cmd.contains("command") && allocate_cmd["command"].is_string(),
+      "JobPreparationPlan command missing 'command' field");
 
-  for (const auto& command : job_prep_plan) {
-    if (!command.contains("command") || !command["command"].is_string()) {
-      throw std::runtime_error(
-          "JobPreparationPlan command missing 'command' field");
-    }
+  std::string allocate_type = allocate_cmd["command"].get<std::string>();
+  TORCH_CHECK(allocate_type == "Allocate",
+              "First command must be 'Allocate', got: " + allocate_type);
 
-    std::string command_type = command["command"].get<std::string>();
-    const auto& properties = command.contains("properties")
-                                 ? command["properties"]
-                                 : nlohmann::json();
+  const auto& allocate_props = allocate_cmd.contains("properties")
+                                   ? allocate_cmd["properties"]
+                                   : nlohmann::json();
 
-    if (command_type == "Allocate") {
-      if (found_allocate) {
-        throw std::runtime_error(
-            "Multiple Allocate commands found in JobPreparationPlan");
-      }
+  TORCH_CHECK(allocate_props.contains("size"),
+              "Allocate command missing 'size' property");
 
-      // Extract size from properties
-      if (!properties.contains("size")) {
-        throw std::runtime_error("Allocate command missing 'size' property");
-      }
+  std::string size_str = allocate_props["size"].get<std::string>();
+  size_t size = std::stoull(size_str);
 
-      // Parse size (stored as string in JSON)
-      std::string size_str = properties["size"].get<std::string>();
-      size_t size = std::stoull(size_str);
+  auto& allocator = SpyreAllocator::instance();
+  c10::DataPtr allocated_ptr = allocator.allocate(size);
 
-      // Call SpyreAllocator to allocate memory
-      auto& allocator = SpyreAllocator::instance();
-      allocated_ptr = allocator.allocate(size);
+  flex::CompositeAddress job_allocation =
+      std::move(static_cast<SharedOwnerCtx*>(allocated_ptr.get_context())
+                    ->composite_addr);
 
-      found_allocate = true;
+  // Process InitTransfer command (second item)
+  const auto& init_cmd = job_prep_plan[1];
+  TORCH_CHECK(init_cmd.contains("command") && init_cmd["command"].is_string(),
+              "JobPreparationPlan command missing 'command' field");
 
-    } else if (command_type == "InitTransfer") {
-      if (found_init_transfer) {
-        throw std::runtime_error(
-            "Multiple InitTransfer commands found in JobPreparationPlan");
-      }
+  std::string init_type = init_cmd["command"].get<std::string>();
+  TORCH_CHECK(init_type == "InitTransfer",
+              "Second command must be 'InitTransfer', got: " + init_type);
 
-      if (!found_allocate) {
-        throw std::runtime_error(
-            "InitTransfer command must come after Allocate command");
-      }
+  const auto& init_props = init_cmd.contains("properties")
+                               ? init_cmd["properties"]
+                               : nlohmann::json();
 
-      // Extract binary file path from properties
-      if (!properties.contains("file_path")) {
-        throw std::runtime_error(
-            "InitTransfer command missing 'binary_file' property");
-      }
+  TORCH_CHECK(init_props.contains("file_path"),
+              "InitTransfer command missing 'file_path' property");
 
-      std::string binary_file = properties["file_path"].get<std::string>();
-      std::filesystem::path binary_path(binary_file);
+  std::string binary_file = init_props["file_path"].get<std::string>();
+  std::filesystem::path binary_path(binary_file);
 
-      // Load binary from file
-      if (!FileExists(binary_path)) {
-        throw std::runtime_error("Binary file not found: " +
-                                 binary_path.string());
-      }
+  std::string binary_data = ReadFileToString(binary_path);
 
-      std::string binary_data = ReadFileToString(binary_path);
+  TORCH_CHECK(init_props.contains("dev_ptr"),
+              "InitTransfer command missing 'dev_ptr' property");
 
-      // Extract device address from properties
-      if (!properties.contains("dev_ptr")) {
-        throw std::runtime_error(
-            "InitTransfer command missing 'dev_ptr' property");
-      }
+  std::string dev_ptr_str = init_props["dev_ptr"].get<std::string>();
+  uint64_t dev_ptr = std::stoull(dev_ptr_str);
 
-      std::string dev_ptr_str = properties["dev_ptr"].get<std::string>();
-      prog_dev_ptr = std::stoull(dev_ptr_str);
+  TORCH_CHECK(allocate_props.contains("size"),
+              "InitTransfer command missing 'size' property");
 
-      auto* program_address =
-          &(static_cast<SharedOwnerCtx*>(allocated_ptr.get_context())
-                ->composite_addr);
+  std::string init_size_str = allocate_props["size"].get<std::string>();
+  size_t init_size = std::stoull(size_str);
 
-      // Create RuntimeOperationH2D to transfer binary to device
-      auto h2d_op = std::make_shared<flex::RuntimeOperationH2D>(
-          const_cast<void*>(static_cast<const void*>(binary_data.data())),
-          program_address);
+  auto device_addr = ComputeOffsetAddress(job_allocation, dev_ptr, init_size);
 
-      // Get the default stream and launch the operation
-      // TODO(jni): launch through SpyreStream
-      auto runtime = GlobalRuntime::get();
-      if (!runtime) {
-        throw std::runtime_error("GlobalRuntime not initialized");
-      }
-      flex::RuntimeStream* stream = runtime->getDefaultStream(0);
-      stream->launchOperation(*h2d_op);
+  // Create RuntimeOperationH2D to transfer binary to device
+  auto h2d_op = flex::RuntimeOperationH2D(
+      const_cast<void*>(static_cast<const void*>(binary_data.data())),
+      &device_addr);
 
-      // Synchronize to ensure transfer completes before returning
-      stream->synchronize();
+  // Get the default stream and launch the operation
+  // TODO(jni): launch through SpyreStream
+  auto runtime = GlobalRuntime::get();
+  flex::RuntimeStream* stream = runtime->getDefaultStream();
+  stream->launchOperation(h2d_op);
 
-      found_init_transfer = true;
-
-    } else {
-      throw std::runtime_error("Unknown JobPreparationPlan command type: " +
-                               command_type);
-    }
-  }
-
-  if (!allocated_ptr) {
-    throw std::runtime_error(
-        "JobPreparationPlan did not allocate program memory");
-  }
-
-  return allocated_ptr;
+  return job_allocation;
 }
 
-// Helper to translate Job Execution Plan to JobPlan
+/**
+ * @brief Helper to translate Job Execution Plan to JobPlan
+ * @param job_exec_plan The JSON job execution plan
+ * @param job_allocation The composite address allocated for the job_allocation
+ * during preparation (moved into JobPlan)
+ */
 std::unique_ptr<JobPlan> TranslateJobExecPlan(
     const nlohmann::json& job_exec_plan,
-    const flex::CompositeAddress& program_address) {
-  if (!job_exec_plan.is_array()) {
-    throw std::runtime_error("JobExecPlan must be an array");
-  }
+    flex::CompositeAddress job_allocation) {
+  TORCH_CHECK(job_exec_plan.is_array(), "JobExecPlan must be an array");
 
   // Parse each command in the JobExecPlan and create JobPlanSteps
-  std::vector<JobPlanStep> steps;
+  std::vector<std::unique_ptr<JobPlanStep>> steps;
   for (const auto& command : job_exec_plan) {
     try {
-      steps.push_back(ParseSpyreCodeCommand(command, program_address));
+      steps.push_back(ParseSpyreCodeCommand(command, job_allocation));
     }
     catch (const std::exception& e) {
-      throw std::runtime_error("Failed to parse SpyreCode command: " +
-                               std::string(e.what()));
+      TORCH_CHECK(false, "Failed to parse SpyreCode command: ", e.what());
     }
   }
 
-  // Create and return the JobPlan
-  return std::make_unique<JobPlan>(std::move(steps));
+  // TODO(jni): expected_input_shapes to be added once provided in SpyreCode
+  // TODO(jni): pinned buffer to be added as std::map once HostCompute provided
+  // in SpyreCode Create and return the JobPlan Use brace initialization to
+  // construct JobPlan with moved members
+  return std::make_unique<JobPlan>(JobPlan{
+      std::move(steps),           // steps
+      std::move(job_allocation),  // job_allocation
+      {},                         // expected_input_shapes
+      {}                          // pinned_buffers
+  });
 }
 
 }  // namespace detail
 
-std::unique_ptr<JobPlan> PrepareKernel(
-    const std::filesystem::path& spyrecode_dir_path) {
-  if (!std::filesystem::exists(spyrecode_dir_path)) {
-    throw std::runtime_error("SpyreCode directory does not exist: " +
-                             spyrecode_dir_path.string());
-  }
+std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir) {
+  std::filesystem::path spyrecode_dir_path(spyrecode_dir);
 
-  if (!std::filesystem::is_directory(spyrecode_dir_path)) {
-    throw std::runtime_error("Path is not a directory: " +
-                             spyrecode_dir_path.string());
-  }
+  TORCH_CHECK(std::filesystem::exists(spyrecode_dir_path),
+              "SpyreCode directory does not exist: ", spyrecode_dir_path);
+
+  TORCH_CHECK(std::filesystem::is_directory(spyrecode_dir_path),
+              "Path is not a directory: ", spyrecode_dir_path);
 
   auto spyrecode_json_path = spyrecode_dir_path / "spyrecode.json";
-  if (!detail::FileExists(spyrecode_json_path)) {
-    throw std::runtime_error(
-        "Required file spyrecode.json not found in directory: " +
-        spyrecode_dir_path.string());
-  }
+  TORCH_CHECK(detail::FileExists(spyrecode_json_path),
+              "Required file spyrecode.json not found in directory: ",
+              spyrecode_dir_path);
 
   std::string json_str = detail::ReadFileToString(spyrecode_json_path);
   nlohmann::json spyrecode_json;
@@ -379,73 +342,24 @@ std::unique_ptr<JobPlan> PrepareKernel(
     spyrecode_json = nlohmann::json::parse(json_str);
   }
   catch (const std::exception& e) {
-    throw std::runtime_error("Failed to parse spyrecode.json: " +
-                             std::string(e.what()));
+    TORCH_CHECK(false, "Failed to parse spyrecode.json: ", e.what());
   }
 
-  if (!spyrecode_json.contains("JobPreparationPlan") ||
-      !spyrecode_json["JobPreparationPlan"].is_array()) {
-    throw std::runtime_error(
-        "SpyreCode JSON missing 'JobPreparationPlan' array");
-  }
+  TORCH_CHECK(spyrecode_json.contains("JobPreparationPlan") &&
+                  spyrecode_json["JobPreparationPlan"].is_array(),
+              "SpyreCode JSON missing 'JobPreparationPlan' array");
 
-  c10::DataPtr allocated_memory = detail::ExecuteJobPreparationPlan(
+  flex::CompositeAddress job_allocation = detail::ExecuteJobPreparationPlan(
       spyrecode_json["JobPreparationPlan"], spyrecode_dir_path);
 
-  // Extract the CompositeAddress from the allocated DataPtr
-  auto program_address =
-      std::move(static_cast<SharedOwnerCtx*>(allocated_memory.get_context())
-                    ->composite_addr);
-
-  if (!spyrecode_json.contains("JobExecPlan") ||
-      !spyrecode_json["JobExecPlan"].is_array()) {
-    throw std::runtime_error("SpyreCode JSON missing 'JobExecPlan' array");
-  }
+  TORCH_CHECK(spyrecode_json.contains("JobExecPlan") &&
+                  spyrecode_json["JobExecPlan"].is_array(),
+              "SpyreCode JSON missing 'JobExecPlan' array");
 
   auto job_plan = detail::TranslateJobExecPlan(spyrecode_json["JobExecPlan"],
-                                               program_address);
-
-  // Store the program memory in JobPlan to keep it alive for the lifetime
-  // of the plan. This prevents premature deallocation of the device memory
-  // that contains the compiled program.
-  job_plan->setProgramMemory(std::move(allocated_memory));
-
-  auto metadata_path = spyrecode_dir_path / "metadata.json";
-  auto expected_shapes = detail::ParseExpectedInputShapes(metadata_path);
-
-  if (!expected_shapes.empty()) {
-    job_plan->setExpectedInputShapes(std::move(expected_shapes));
-  }
+                                               std::move(job_allocation));
 
   return job_plan;
-}
-
-bool ValidateSpyreCodeDir(const std::filesystem::path& spyrecode_dir_path,
-                          bool strict) {
-  // Check if directory exists
-  if (!std::filesystem::exists(spyrecode_dir_path)) {
-    return false;
-  }
-
-  if (!std::filesystem::is_directory(spyrecode_dir_path)) {
-    return false;
-  }
-
-  // Check for required spyrecode.json file
-  auto spyrecode_json_path = spyrecode_dir_path / "spyrecode.json";
-  if (!detail::FileExists(spyrecode_json_path)) {
-    return false;
-  }
-
-  // If strict validation is enabled, check file size
-  if (strict) {
-    auto file_size = std::filesystem::file_size(spyrecode_json_path);
-    if (file_size == 0) {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 }  // namespace spyre

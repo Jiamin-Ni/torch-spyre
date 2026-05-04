@@ -21,8 +21,6 @@
 #include <utility>
 #include <vector>
 
-#include "flex/allocator/alloc_address.hpp"
-#include "flex/runtime_stream/runtime_operation.hpp"
 #include "spyre_allocator.h"
 
 namespace spyre {
