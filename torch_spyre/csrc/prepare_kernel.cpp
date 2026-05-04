@@ -20,12 +20,12 @@
 #include <filesystem>  // NOLINT
 #include <fstream>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "common/json.hpp"
 #include "job_plan.h"
 #include "module.h"
 #include "spyre_allocator.h"
