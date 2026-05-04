@@ -100,7 +100,7 @@ std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
     TORCH_CHECK(properties.contains("job_bin_ptr"),
                 command_type + " command missing 'job_bin_ptr' property");
 
-    std::string job_bin_ptr_str = properties["dev_ptr"].get<std::string>();
+    std::string job_bin_ptr_str = properties["job_bin_ptr"].get<std::string>();
     uint64_t job_bin_ptr = std::stoull(job_bin_ptr_str);
 
     auto job_bin_addr = ComputeOffsetAddress(job_allocation, job_bin_ptr);
