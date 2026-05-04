@@ -19,7 +19,7 @@
 #include <torch/types.h>
 
 #include <cstdint>
-#include <flex/allocator/alloc_address.hpp>
+#include <flex/flex.hpp>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -319,14 +319,6 @@ struct JobPlan {
   std::vector<std::unique_ptr<JobPlanStep>> steps;
 
   /**
-   * @brief Compiled tile dimensions from SpyreCode
-   *
-   * One entry per kernel input tensor. Used by SpyreStream for tiling
-   * detection. Empty for pure DMA JobPlans (e.g., tensor .to(device)).
-   */
-  std::vector<std::vector<int64_t>> expected_input_shapes;
-
-  /**
    * @brief Owning CompositeAddress of the program binary, and conditionally
    * program correction data and spillover tensor data
    *
@@ -338,6 +330,14 @@ struct JobPlan {
    * operations.
    */
   flex::CompositeAddress job_allocation;
+
+  /**
+   * @brief Compiled tile dimensions from SpyreCode
+   *
+   * One entry per kernel input tensor. Used by SpyreStream for tiling
+   * detection. Empty for pure DMA JobPlans (e.g., tensor .to(device)).
+   */
+  std::vector<std::vector<int64_t>> expected_input_shapes;
 
   /**
    * @brief Pinned host buffers owned by this JobPlan
