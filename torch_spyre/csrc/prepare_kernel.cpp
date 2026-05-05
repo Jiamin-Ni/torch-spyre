@@ -369,7 +369,7 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
               "InitTransfer command missing 'size' property");
 
   std::string init_size_str = allocate_props["size"].get<std::string>();
-  size_t init_size = std::stoull(size_str);
+  size_t init_size = std::stoull(init_size_str);
 
   auto device_addr = ComputeOffsetAddress(job_allocation, dev_ptr, init_size);
 
