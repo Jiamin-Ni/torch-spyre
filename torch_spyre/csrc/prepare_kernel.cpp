@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,58 @@
 namespace spyre {
 
 namespace detail {
+
+/**
+ * @brief Enum for SpyreCode command types
+ */
+enum class SpyreCodeCommandType {
+  ComputeOnDevice,
+  ComputeOnHost,
+  DataTransfer,
+  Allocate,
+  InitTransfer,
+  Unknown
+};
+
+/**
+ * @brief Enum for DataTransfer direction
+ */
+enum class TransferDirection {
+  HostToDevice,  // H2D
+  DeviceToHost,  // D2H
+  Unknown
+};
+
+/**
+ * @brief Parse command type string to enum
+ * @param command_str The command string from JSON
+ * @return Corresponding SpyreCodeCommandType enum value
+ */
+static SpyreCodeCommandType ParseCommandType(const std::string& command_str) {
+  static const std::unordered_map<std::string, SpyreCodeCommandType> mapping = {
+      {"ComputeOnDevice", SpyreCodeCommandType::ComputeOnDevice},
+      {"ComputeOnHost", SpyreCodeCommandType::ComputeOnHost},
+      {"DataTransfer", SpyreCodeCommandType::DataTransfer},
+      {"Allocate", SpyreCodeCommandType::Allocate},
+      {"InitTransfer", SpyreCodeCommandType::InitTransfer}};
+
+  auto it = mapping.find(command_str);
+  return it != mapping.end() ? it->second : SpyreCodeCommandType::Unknown;
+}
+
+/**
+ * @brief Parse transfer direction string to enum
+ * @param dirn_str The direction string from JSON ("false" = H2D, "true" = D2H)
+ * @return Corresponding TransferDirection enum value
+ */
+static TransferDirection ParseTransferDirection(const std::string& dirn_str) {
+  if (dirn_str == "false") {
+    return TransferDirection::HostToDevice;
+  } else if (dirn_str == "true") {
+    return TransferDirection::DeviceToHost;
+  }
+  return TransferDirection::Unknown;
+}
 
 static uint64_t job_allocation_ptr_start = 120259084288;
 
@@ -83,54 +136,65 @@ std::string ReadFileToString(const std::filesystem::path& path) {
 }
 
 /**
- * @brief Helper to parse a SpyreCode JSON command and create a JobPlanStep
- * @param command The JSON command to parse
- * @param program_address The composite address allocated for the job_allocation
+ * @brief Parse ComputeOnDevice command and create JobPlanStep
+ * @param properties The properties JSON object from the command
+ * @param job_allocation The composite address allocated for the job_allocation
+ * @return JobPlanStepComputeSpecialize for device compute
  */
-std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
-    const nlohmann::json& command,
+static std::unique_ptr<JobPlanStep> ParseComputeOnDevice(
+    const nlohmann::json& properties,
     const flex::CompositeAddress& job_allocation) {
-  TORCH_CHECK(command.contains("command") && command["command"].is_string(),
-              "SpyreCode command missing 'command' field");
+  TORCH_CHECK(properties.contains("job_bin_ptr"),
+              "ComputeOnDevice command missing 'job_bin_ptr' property");
 
-  std::string command_type = command["command"].get<std::string>();
-  const auto& properties =
-      command.contains("properties") ? command["properties"] : nlohmann::json();
+  std::string job_bin_ptr_str = properties["job_bin_ptr"].get<std::string>();
+  uint64_t job_bin_ptr = std::stoull(job_bin_ptr_str);
 
-  if (command_type == "ComputeOnDevice") {
-    TORCH_CHECK(properties.contains("job_bin_ptr"),
-                command_type + " command missing 'job_bin_ptr' property");
+  auto job_bin_addr = ComputeOffsetAddress(job_allocation, job_bin_ptr);
+  // Create RuntimeOperationCompute with the allocated program address
+  return std::make_unique<JobPlanStepComputeSpecialize>(
+      std::move(job_bin_addr));
+}
 
-    std::string job_bin_ptr_str = properties["job_bin_ptr"].get<std::string>();
-    uint64_t job_bin_ptr = std::stoull(job_bin_ptr_str);
+/**
+ * @brief Parse ComputeOnHost command and create JobPlanStep
+ * @param properties The properties JSON object from the command
+ * @param job_allocation The composite address allocated for the job_allocation
+ * @return JobPlanStepHostCompute for host-side computation
+ */
+static std::unique_ptr<JobPlanStep> ParseComputeOnHost(
+    const nlohmann::json& properties,
+    const flex::CompositeAddress& job_allocation) {
+  // TODO(jni): create JobPlanStepHostCompute
+  TORCH_CHECK(false,
+              "ComputeOnHost not yet implemented - waiting for deeptools PR to "
+              "be merged");
+  return nullptr;
+}
 
-    auto job_bin_addr = ComputeOffsetAddress(job_allocation, job_bin_ptr);
-    // Create RuntimeOperationCompute with the allocated program address
-    auto compute_op =
-        std::make_unique<JobPlanStepComputeSpecialize>(std::move(job_bin_addr));
+/**
+ * @brief Parse DataTransfer command and create JobPlanStep
+ * @param properties The properties JSON object from the command
+ * @param job_allocation The composite address allocated for the job_allocation
+ * @return JobPlanStepH2D or JobPlanStepD2H depending on transfer direction
+ */
+static std::unique_ptr<JobPlanStep> ParseDataTransfer(
+    const nlohmann::json& properties,
+    const flex::CompositeAddress& job_allocation) {
+  // TODO(jni): create JobPlanStepH2D or JobPlanStepD2H
+  TORCH_CHECK(false,
+              "DataTransfer not yet implemented - waiting for deeptools PR to "
+              "be merged");
 
-    return compute_op;
+  // Extract direction: 0 = H2D, 1 = D2H
+  TORCH_CHECK(properties.contains("dirn"),
+              "DataTransfer command missing 'dirn' property");
 
-  } else if (command_type == "ComputeOnHost") {
-    // TODO(jni): create JobPlanStepHostCompute
-    TORCH_CHECK(
-        false,
-        "ComputeOnHost not yet implemented - waiting for deeptools PR to "
-        "be merged");
-  } else if (command_type == "DataTransfer") {
-    // TODO(jni): create JobPlanStepH2D or JobPlanStepD2H
-    TORCH_CHECK(
-        false,
-        "ComputeOnHost not yet implemented - waiting for deeptools PR to "
-        "be merged");
+  std::string dirn_str = properties["dirn"].get<std::string>();
+  TransferDirection direction = ParseTransferDirection(dirn_str);
 
-    // Extract direction: 0 = H2D, 1 = D2H
-    TORCH_CHECK(properties.contains("dirn"),
-                "DataTransfer command missing 'dirn' property");
-
-    std::string dirn_str = properties["dirn"].get<std::string>();
-
-    if (dirn_str == "false") {
+  switch (direction) {
+    case TransferDirection::HostToDevice: {
       // Host-to-Device transfer
       // Extract host and device addresses
       TORCH_CHECK(properties.contains("dev_ptr"),
@@ -142,8 +206,8 @@ std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
       std::string dev_ptr_str = properties["dev_ptr"].get<std::string>();
       std::string size_str = properties["size"].get<std::string>();
 
-      // TODO(jni): host_handle should contain info about the host buffer to be
-      // copied, figure out how and connect host_addr
+      // TODO(jni): host_handle should contain info about the host buffer
+      // to be copied, figure out how and connect host_addr
       TORCH_CHECK(properties.contains("host_handle"),
                   "DataTransfer H2D missing 'host_handle' property");
       std::string host_handle_str =
@@ -156,11 +220,10 @@ std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
       flex::CompositeAddress comp_addr =
           ComputeOffsetAddress(job_allocation, device_ptr, transfer_size);
 
-      auto h2d_op =
-          std::make_unique<JobPlanStepH2D>(host_addr, std::move(comp_addr));
-      return h2d_op;
+      return std::make_unique<JobPlanStepH2D>(host_addr, std::move(comp_addr));
+    }
 
-    } else if (dirn_str == "true") {
+    case TransferDirection::DeviceToHost: {
       // Device-to-Host transfer
       // Extract host and device addresses
       TORCH_CHECK(properties.contains("dev_ptr"),
@@ -172,10 +235,10 @@ std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
       std::string dev_ptr_str = properties["dev_ptr"].get<std::string>();
       std::string size_str = properties["size"].get<std::string>();
 
-      // TODO(jni): host_handle should contain info about the host buffer to be
-      // copied to, figure out how and connect host_addr
+      // TODO(jni): host_handle should contain info about the host buffer
+      // to be copied to, figure out how and connect host_addr
       TORCH_CHECK(properties.contains("host_handle"),
-                  "DataTransfer H2D missing 'host_handle' property");
+                  "DataTransfer D2H missing 'host_handle' property");
       std::string host_handle_str =
           properties["host_handle"].get<std::string>();
       void* host_addr = nullptr;
@@ -186,17 +249,51 @@ std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
       flex::CompositeAddress comp_addr =
           ComputeOffsetAddress(job_allocation, device_ptr, transfer_size);
 
-      auto d2h_op =
-          std::make_unique<JobPlanStepD2H>(std::move(comp_addr), host_addr);
-      return d2h_op;
-
-    } else {
-      TORCH_CHECK(false, "Invalid DataTransfer direction: ", dirn_str);
+      return std::make_unique<JobPlanStepD2H>(std::move(comp_addr), host_addr);
     }
 
-  } else {
-    TORCH_CHECK(false, "Unknown SpyreCode command type: ", command_type);
+    case TransferDirection::Unknown:
+    default:
+      TORCH_CHECK(false, "Invalid DataTransfer direction: ", dirn_str);
   }
+
+  // Unreachable, but needed to suppress compiler warning
+  return nullptr;
+}
+
+/**
+ * @brief Helper to parse a SpyreCode JSON command and create a JobPlanStep
+ * @param command The JSON command to parse
+ * @param job_allocation The composite address allocated for the job_allocation
+ */
+std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
+    const nlohmann::json& command,
+    const flex::CompositeAddress& job_allocation) {
+  TORCH_CHECK(command.contains("command") && command["command"].is_string(),
+              "SpyreCode command missing 'command' field");
+
+  std::string command_type_str = command["command"].get<std::string>();
+  SpyreCodeCommandType command_type = ParseCommandType(command_type_str);
+  const auto& properties =
+      command.contains("properties") ? command["properties"] : nlohmann::json();
+
+  switch (command_type) {
+    case SpyreCodeCommandType::ComputeOnDevice:
+      return ParseComputeOnDevice(properties, job_allocation);
+
+    case SpyreCodeCommandType::ComputeOnHost:
+      return ParseComputeOnHost(properties, job_allocation);
+
+    case SpyreCodeCommandType::DataTransfer:
+      return ParseDataTransfer(properties, job_allocation);
+
+    case SpyreCodeCommandType::Unknown:
+    default:
+      TORCH_CHECK(false, "Unknown SpyreCode command type: ", command_type_str);
+  }
+
+  // Unreachable, but needed to suppress compiler warning
+  return nullptr;
 }
 
 /**
@@ -216,9 +313,10 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
       allocate_cmd.contains("command") && allocate_cmd["command"].is_string(),
       "JobPreparationPlan command missing 'command' field");
 
-  std::string allocate_type = allocate_cmd["command"].get<std::string>();
-  TORCH_CHECK(allocate_type == "Allocate",
-              "First command must be 'Allocate', got: " + allocate_type);
+  std::string allocate_type_str = allocate_cmd["command"].get<std::string>();
+  SpyreCodeCommandType allocate_type = ParseCommandType(allocate_type_str);
+  TORCH_CHECK(allocate_type == SpyreCodeCommandType::Allocate,
+              "First command must be 'Allocate', got: " + allocate_type_str);
 
   const auto& allocate_props = allocate_cmd.contains("properties")
                                    ? allocate_cmd["properties"]
@@ -242,9 +340,10 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
   TORCH_CHECK(init_cmd.contains("command") && init_cmd["command"].is_string(),
               "JobPreparationPlan command missing 'command' field");
 
-  std::string init_type = init_cmd["command"].get<std::string>();
-  TORCH_CHECK(init_type == "InitTransfer",
-              "Second command must be 'InitTransfer', got: " + init_type);
+  std::string init_type_str = init_cmd["command"].get<std::string>();
+  SpyreCodeCommandType init_type = ParseCommandType(init_type_str);
+  TORCH_CHECK(init_type == SpyreCodeCommandType::InitTransfer,
+              "Second command must be 'InitTransfer', got: " + init_type_str);
 
   const auto& init_props = init_cmd.contains("properties")
                                ? init_cmd["properties"]
