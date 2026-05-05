@@ -199,14 +199,17 @@ class JobPlanStepCompute final : public JobPlanStep {
    *
    * @param binary_address Address of the program binary on device
    */
-  explicit JobPlanStepCompute(flex::CompositeAddress binary_address)
-      : binary_address_(std::move(binary_address)) {}
+  explicit JobPlanStepCompute(flex::CompositeAddress binary_address,
+                              bool specialize_addresses)
+      : binary_address_(std::move(binary_address)),
+        specialize_addresses_(specialize_addresses) {}
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
 
  private:
   flex::CompositeAddress binary_address_;
+  bool specialize_addresses_;
 };
 
 /**
@@ -254,30 +257,6 @@ class JobPlanStepHostCompute final : public JobPlanStep {
   HostComputeFunction function_;
   std::unique_ptr<HostComputeMetadata> metadata_;
   void* output_buffer_;  // Non-owning pointer (JobPlan owns the buffer)
-};
-
-/**
- * @brief Specializes a resident kernel using composite addresses
- *
- * Binary address resolved during PrepareKernel; tensor input/output addresses
- * extracted from ctx.composite_addresses during construct(). Produces a
- * RuntimeOperationComputeSpecializeResident.
- */
-class JobPlanStepComputeSpecialize final : public JobPlanStep {
- public:
-  /**
-   * @brief Construct compute specialize step
-   *
-   * @param binary_address Address of the resident program binary on device
-   */
-  explicit JobPlanStepComputeSpecialize(flex::CompositeAddress binary_address)
-      : binary_address_(std::move(binary_address)) {}
-
-  std::unique_ptr<flex::RuntimeOperation> construct(
-      LaunchContext& ctx) const override;
-
- private:
-  flex::CompositeAddress binary_address_;
 };
 
 /**

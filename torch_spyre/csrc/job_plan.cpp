@@ -42,7 +42,22 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepD2H::construct(
 }
 
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
-    LaunchContext&) const {
+    LaunchContext& ctx) const {
+  if (specialize_addresses_) {
+    std::vector<const flex::CompositeAddress*> inp;
+    for (auto& tensor : ctx.inputs_outputs) {
+      flex::CompositeAddress* address =
+          &(static_cast<SharedOwnerCtx*>(
+                tensor.storage().data_ptr().get_context())
+                ->composite_addr);
+      inp.push_back((address));
+    }
+
+    auto op =
+        std::make_unique<flex::RuntimeOperationCompute>(&binary_address_, inp);
+    op->setPipelineBarrier(pipeline_barrier_);
+    return op;
+  }
   auto op = std::make_unique<flex::RuntimeOperationCompute>(&binary_address_);
   op->setPipelineBarrier(pipeline_barrier_);
   return op;
@@ -81,22 +96,6 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
   auto op = std::make_unique<flex::RuntimeOperationHostCallback>(
       pipeline_barrier_, std::move(callback), nullptr);
 
-  return op;
-}
-
-std::unique_ptr<flex::RuntimeOperation> JobPlanStepComputeSpecialize::construct(
-    LaunchContext& ctx) const {
-  std::vector<const flex::CompositeAddress*> inp;
-  for (auto& tensor : ctx.inputs_outputs) {
-    flex::CompositeAddress* address = &(
-        static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
-            ->composite_addr);
-    inp.push_back((address));
-  }
-
-  auto op =
-      std::make_unique<flex::RuntimeOperationCompute>(&binary_address_, inp);
-  op->setPipelineBarrier(pipeline_barrier_);
   return op;
 }
 

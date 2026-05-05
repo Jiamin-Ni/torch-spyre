@@ -143,7 +143,7 @@ std::string ReadFileToString(const std::filesystem::path& path) {
  */
 static std::unique_ptr<JobPlanStep> ParseComputeOnDevice(
     const nlohmann::json& properties,
-    const flex::CompositeAddress& job_allocation) {
+    const flex::CompositeAddress& job_allocation, bool specialize_addresses) {
   TORCH_CHECK(properties.contains("job_bin_ptr"),
               "ComputeOnDevice command missing 'job_bin_ptr' property");
 
@@ -152,8 +152,8 @@ static std::unique_ptr<JobPlanStep> ParseComputeOnDevice(
 
   auto job_bin_addr = ComputeOffsetAddress(job_allocation, job_bin_ptr);
   // Create RuntimeOperationCompute with the allocated program address
-  return std::make_unique<JobPlanStepComputeSpecialize>(
-      std::move(job_bin_addr));
+  return std::make_unique<JobPlanStepCompute>(std::move(job_bin_addr),
+                                              specialize_addresses);
 }
 
 /**
@@ -267,8 +267,8 @@ static std::unique_ptr<JobPlanStep> ParseDataTransfer(
  * @param job_allocation The composite address allocated for the job_allocation
  */
 std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
-    const nlohmann::json& command,
-    const flex::CompositeAddress& job_allocation) {
+    const nlohmann::json& command, const flex::CompositeAddress& job_allocation,
+    bool specialize_addresses) {
   TORCH_CHECK(command.contains("command") && command["command"].is_string(),
               "SpyreCode command missing 'command' field");
 
@@ -279,7 +279,8 @@ std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
 
   switch (command_type) {
     case SpyreCodeCommandType::ComputeOnDevice:
-      return ParseComputeOnDevice(properties, job_allocation);
+      return ParseComputeOnDevice(properties, job_allocation,
+                                  specialize_addresses);
 
     case SpyreCodeCommandType::ComputeOnHost:
       return ParseComputeOnHost(properties, job_allocation);
@@ -391,11 +392,17 @@ std::unique_ptr<JobPlan> TranslateJobExecPlan(
     flex::CompositeAddress job_allocation) {
   TORCH_CHECK(job_exec_plan.is_array(), "JobExecPlan must be an array");
 
+  bool specialize_addresses = true;
+  if (job_exec_plan.size() > 1) {
+    specialize_addresses = false;
+  }
+
   // Parse each command in the JobExecPlan and create JobPlanSteps
   std::vector<std::unique_ptr<JobPlanStep>> steps;
   for (const auto& command : job_exec_plan) {
     try {
-      steps.push_back(ParseSpyreCodeCommand(command, job_allocation));
+      steps.push_back(
+          ParseSpyreCodeCommand(command, job_allocation, specialize_addresses));
     }
     catch (const std::exception& e) {
       TORCH_CHECK(false, "Failed to parse SpyreCode command: ", e.what());
