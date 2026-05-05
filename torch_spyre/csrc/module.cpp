@@ -340,9 +340,6 @@ PYBIND11_MODULE(_C, m) {
             } else if (dynamic_cast<const spyre::JobPlanStepHostCompute *>(
                            step.get())) {
               return "HostCompute";
-            } else if (dynamic_cast<const spyre::JobPlanStepComputeSpecialize
-                                        *>(step.get())) {
-              return "ComputeSpecialize";
             } else {
               return "Unknown";
             }
