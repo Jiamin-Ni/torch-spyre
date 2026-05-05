@@ -86,7 +86,7 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
 
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepComputeSpecialize::construct(
     LaunchContext& ctx) const {
-  std::vector<flex::CompositeAddress*> inp;
+  std::vector<const flex::CompositeAddress*> inp;
   for (auto& tensor : ctx.inputs_outputs) {
     flex::CompositeAddress* address = &(
         static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
@@ -94,11 +94,8 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepComputeSpecialize::construct(
     inp.push_back((address));
   }
 
-  TORCH_CHECK(false, "not yet implemented - waiting for flex PR merge");
-  // TODO(jni): update once flex PR merged
-  // auto op =
-  //    std::make_unique<flex::RuntimeOperationCompute>(&binary_address_, inp);
-  auto op = std::make_unique<flex::RuntimeOperationCompute>(&binary_address_);
+  auto op =
+      std::make_unique<flex::RuntimeOperationCompute>(&binary_address_, inp);
   op->setPipelineBarrier(pipeline_barrier_);
   return op;
 }
