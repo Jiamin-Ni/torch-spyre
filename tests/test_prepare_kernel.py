@@ -36,62 +36,55 @@ class TestPrepareKernel:
 
     def create_mock_spyrecode(self, tmpdir):
         """Create a mock SpyreCode directory structure for testing.
-        
+
         Args:
             tmpdir: Temporary directory path
-            
+
         Returns:
             Path to the SpyreCode directory
         """
         spyrecode_dir = os.path.join(tmpdir, "mock_spyrecode")
         os.makedirs(spyrecode_dir, exist_ok=True)
-        
+
         # Create a minimal spyrecode.json
         spyrecode_json = {
             "JobPreparationPlan": [
-                {
-                    "command": "Allocate",
-                    "properties": {
-                        "size": "1024"
-                    }
-                },
+                {"command": "Allocate", "properties": {"size": "1024"}},
                 {
                     "command": "InitTransfer",
                     "properties": {
                         "file_path": os.path.join(spyrecode_dir, "init.bin"),
                         "dev_ptr": "120259084288",
-                        "size": "1024"
-                    }
-                }
+                        "size": "1024",
+                    },
+                },
             ],
             "JobExecPlan": [
                 {
                     "command": "ComputeOnDevice",
-                    "properties": {
-                        "job_bin_ptr": "120259084288"
-                    }
+                    "properties": {"job_bin_ptr": "120259084288"},
                 }
-            ]
+            ],
         }
-        
+
         # Write spyrecode.json
         with open(os.path.join(spyrecode_dir, "spyrecode.json"), "w") as f:
             json.dump(spyrecode_json, f, indent=2)
-        
+
         # Create a dummy binary file
         with open(os.path.join(spyrecode_dir, "init.bin"), "wb") as f:
             f.write(b"\x00" * 1024)
-        
+
         return spyrecode_dir
 
     def test_prepare_kernel_basic(self):
         """Test basic PrepareKernel functionality."""
         with tempfile.TemporaryDirectory() as tmpdir:
             spyrecode_dir = self.create_mock_spyrecode(tmpdir)
-            
+
             # Call prepare_kernel
             job_plan = torch_spyre._C.prepare_kernel(spyrecode_dir)
-            
+
             # Verify JobPlan was created
             assert job_plan is not None
             assert isinstance(job_plan, torch_spyre._C.JobPlan)
@@ -101,7 +94,7 @@ class TestPrepareKernel:
         with tempfile.TemporaryDirectory() as tmpdir:
             spyrecode_dir = self.create_mock_spyrecode(tmpdir)
             job_plan = torch_spyre._C.prepare_kernel(spyrecode_dir)
-            
+
             # Should have 1 step (ComputeOnDevice)
             assert job_plan.num_steps() == 1
 
@@ -110,7 +103,7 @@ class TestPrepareKernel:
         with tempfile.TemporaryDirectory() as tmpdir:
             spyrecode_dir = self.create_mock_spyrecode(tmpdir)
             job_plan = torch_spyre._C.prepare_kernel(spyrecode_dir)
-            
+
             # Should match the allocated size (1024 bytes)
             assert job_plan.job_allocation_size() == 1024
 
@@ -119,7 +112,7 @@ class TestPrepareKernel:
         with tempfile.TemporaryDirectory() as tmpdir:
             spyrecode_dir = self.create_mock_spyrecode(tmpdir)
             job_plan = torch_spyre._C.prepare_kernel(spyrecode_dir)
-            
+
             # First step should be ComputeSpecialize
             assert job_plan.get_step_type(0) == "ComputeSpecialize"
 
@@ -140,12 +133,11 @@ class TestPrepareKernel:
         with tempfile.TemporaryDirectory() as tmpdir:
             spyrecode_dir = self.create_mock_spyrecode(tmpdir)
             job_plan = torch_spyre._C.prepare_kernel(spyrecode_dir)
-            
+
             # Should raise error for out-of-range index
             with pytest.raises(RuntimeError, match="Step index out of range"):
                 job_plan.get_step_type(999)
 
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
-# Made with Bob
