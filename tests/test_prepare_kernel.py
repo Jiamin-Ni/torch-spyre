@@ -43,7 +43,7 @@ class TestPrepareKernel:
         Returns:
             Path to the SpyreCode directory
         """
-        spyrecode_dir = os.path.join(tmpdir, "mock_spyrecode")
+        spyrecode_dir = os.path.join(tmpdir, "spyreCodeDir")
         os.makedirs(spyrecode_dir, exist_ok=True)
 
         # Create a minimal spyrecode.json
@@ -53,7 +53,7 @@ class TestPrepareKernel:
                 {
                     "command": "InitTransfer",
                     "properties": {
-                        "file_path": os.path.join(spyrecode_dir, "init.bin"),
+                        "file_path": tmpdir,
                         "dev_ptr": "120259084288",
                         "size": "1024",
                     },

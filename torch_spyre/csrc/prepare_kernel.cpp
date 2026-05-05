@@ -254,6 +254,7 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
 
   std::string binary_file = init_props["file_path"].get<std::string>();
   std::filesystem::path binary_path(binary_file);
+  binary_path += "/spyreCodeDir/init.bin";
 
   std::string binary_data = ReadFileToString(binary_path);
 
