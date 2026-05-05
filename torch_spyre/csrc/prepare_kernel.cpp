@@ -29,6 +29,7 @@
 #include "job_plan.h"
 #include "module.h"
 #include "spyre_allocator.h"
+#include "spyre_stream.h"
 
 namespace spyre {
 
@@ -272,16 +273,10 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
 
   auto device_addr = ComputeOffsetAddress(job_allocation, dev_ptr, init_size);
 
-  // Create RuntimeOperationH2D to transfer binary to device
-  auto h2d_op = flex::RuntimeOperationH2D(
+  auto stream = getCurrentStream();
+  stream.copyProgramAsync(
       const_cast<void*>(static_cast<const void*>(binary_data.data())),
       &device_addr);
-
-  // Get the default stream and launch the operation
-  // TODO(jni): launch through SpyreStream
-  auto runtime = GlobalRuntime::get();
-  flex::RuntimeStream* stream = runtime->getDefaultStream();
-  stream->launchOperation(h2d_op);
 
   return job_allocation;
 }
