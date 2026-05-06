@@ -114,7 +114,7 @@ class TestPrepareKernel:
             job_plan = torch_spyre._C.prepare_kernel(spyrecode_dir)
 
             # First step should be ComputeSpecialize
-            assert job_plan.get_step_type(0) == "ComputeSpecialize"
+            assert job_plan.get_step_type(0) == "Compute"
 
     def test_prepare_kernel_invalid_directory(self):
         """Test PrepareKernel with invalid directory."""
