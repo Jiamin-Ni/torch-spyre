@@ -298,26 +298,20 @@ std::unique_ptr<JobPlanStep> ParseSpyreCodeCommand(
 }
 
 /**
- * @brief Helper to execute Job Preparation Plan
- * @return CompositeAddress allocated for the job_allocation during preparation
+ * @brief Execute Allocate command from Job Preparation Plan
+ * @param allocate_cmd The JSON allocate command
+ * @return CompositeAddress allocated for the job_allocation
  */
-flex::CompositeAddress ExecuteJobPreparationPlan(
-    const nlohmann::json& job_prep_plan,
-    const std::filesystem::path& spyrecode_dir) {
-  TORCH_CHECK(job_prep_plan.is_array() && job_prep_plan.size() == 2,
-              "JobPreparationPlan must be an array with exactly 2 commands "
-              "(Allocate and InitTransfer)");
-
-  // Process Allocate command (first item)
-  const auto& allocate_cmd = job_prep_plan[0];
+static flex::CompositeAddress ExecuteAllocate(
+    const nlohmann::json& allocate_cmd) {
   TORCH_CHECK(
       allocate_cmd.contains("command") && allocate_cmd["command"].is_string(),
-      "JobPreparationPlan command missing 'command' field");
+      "Allocate command missing 'command' field");
 
   std::string allocate_type_str = allocate_cmd["command"].get<std::string>();
   SpyreCodeCommandType allocate_type = ParseCommandType(allocate_type_str);
   TORCH_CHECK(allocate_type == SpyreCodeCommandType::Allocate,
-              "First command must be 'Allocate', got: " + allocate_type_str);
+              "Expected 'Allocate' command, got: " + allocate_type_str);
 
   const auto& allocate_props = allocate_cmd.contains("properties")
                                    ? allocate_cmd["properties"]
@@ -332,19 +326,25 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
   auto& allocator = SpyreAllocator::instance();
   c10::DataPtr allocated_ptr = allocator.allocate(size);
 
-  flex::CompositeAddress job_allocation =
-      std::move(static_cast<SharedOwnerCtx*>(allocated_ptr.get_context())
-                    ->composite_addr);
+  return std::move(static_cast<SharedOwnerCtx*>(allocated_ptr.get_context())
+                       ->composite_addr);
+}
 
-  // Process InitTransfer command (second item)
-  const auto& init_cmd = job_prep_plan[1];
+/**
+ * @brief Execute InitTransfer command from Job Preparation Plan
+ * @param init_cmd The JSON init transfer command
+ * @param job_allocation The composite address allocated for the job_allocation
+ */
+static void ExecuteInitTransfer(const nlohmann::json& init_cmd,
+                                const flex::CompositeAddress& job_allocation,
+                                const SpyreStream& stream) {
   TORCH_CHECK(init_cmd.contains("command") && init_cmd["command"].is_string(),
-              "JobPreparationPlan command missing 'command' field");
+              "InitTransfer command missing 'command' field");
 
   std::string init_type_str = init_cmd["command"].get<std::string>();
   SpyreCodeCommandType init_type = ParseCommandType(init_type_str);
   TORCH_CHECK(init_type == SpyreCodeCommandType::InitTransfer,
-              "Second command must be 'InitTransfer', got: " + init_type_str);
+              "Expected 'InitTransfer' command, got: " + init_type_str);
 
   const auto& init_props = init_cmd.contains("properties")
                                ? init_cmd["properties"]
@@ -355,7 +355,6 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
 
   std::string binary_file = init_props["file_path"].get<std::string>();
   std::filesystem::path binary_path(binary_file);
-  binary_path += "/spyreCodeDir/init.bin";
 
   std::string binary_data = ReadFileToString(binary_path);
 
@@ -365,18 +364,37 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
   std::string dev_ptr_str = init_props["dev_ptr"].get<std::string>();
   uint64_t dev_ptr = std::stoull(dev_ptr_str);
 
-  TORCH_CHECK(allocate_props.contains("size"),
+  TORCH_CHECK(init_props.contains("size"),
               "InitTransfer command missing 'size' property");
 
-  std::string init_size_str = allocate_props["size"].get<std::string>();
+  std::string init_size_str = init_props["size"].get<std::string>();
   size_t init_size = std::stoull(init_size_str);
 
   auto device_addr = ComputeOffsetAddress(job_allocation, dev_ptr, init_size);
 
-  auto stream = getCurrentStream();
   stream.copyProgramAsync(
       const_cast<void*>(static_cast<const void*>(binary_data.data())),
       &device_addr);
+}
+
+/**
+ * @brief Helper to execute Job Preparation Plan
+ * @return CompositeAddress allocated for the job_allocation during preparation
+ */
+flex::CompositeAddress ExecuteJobPreparationPlan(
+    const nlohmann::json& job_prep_plan) {
+  TORCH_CHECK(job_prep_plan.is_array() && job_prep_plan.size() >= 2,
+              "JobPreparationPlan must be an array with at least 2 commands "
+              "(1 Allocate and 1+ InitTransfer)");
+
+  // Execute Allocate command (first item)
+  flex::CompositeAddress job_allocation = ExecuteAllocate(job_prep_plan[0]);
+
+  // Execute InitTransfer commands (remaining items)
+  auto stream = getCurrentStream();
+  for (size_t i = 1; i < job_prep_plan.size(); ++i) {
+    ExecuteInitTransfer(job_prep_plan[i], job_allocation, stream);
+  }
 
   return job_allocation;
 }
@@ -451,8 +469,8 @@ std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir) {
                   spyrecode_json["JobPreparationPlan"].is_array(),
               "SpyreCode JSON missing 'JobPreparationPlan' array");
 
-  flex::CompositeAddress job_allocation = detail::ExecuteJobPreparationPlan(
-      spyrecode_json["JobPreparationPlan"], spyrecode_dir_path);
+  flex::CompositeAddress job_allocation =
+      detail::ExecuteJobPreparationPlan(spyrecode_json["JobPreparationPlan"]);
 
   TORCH_CHECK(spyrecode_json.contains("JobExecPlan") &&
                   spyrecode_json["JobExecPlan"].is_array(),
