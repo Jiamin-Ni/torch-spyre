@@ -53,7 +53,7 @@ class TestPrepareKernel:
                 {
                     "command": "InitTransfer",
                     "properties": {
-                        "file_path": tmpdir,
+                        "file_path": os.path.join(spyrecode_dir, "init.bin"),
                         "dev_ptr": "120259084288",
                         "size": "1024",
                     },
