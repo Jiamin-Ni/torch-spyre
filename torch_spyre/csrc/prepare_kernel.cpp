@@ -27,6 +27,8 @@
 #include <utility>
 #include <vector>
 
+#include "flex/include/flex/util/defines.hpp"
+#include "flex/util/defines.hpp"
 #include "job_plan.h"
 #include "module.h"
 #include "spyre_allocator.h"
@@ -88,8 +90,6 @@ static TransferDirection ParseTransferDirection(const std::string& dirn_str) {
   return TransferDirection::Unknown;
 }
 
-static uint64_t job_allocation_ptr_start = 120259084288;
-
 /**
  * @brief Helper to compute CompositeAddress with offset from device_addr for
  * program
@@ -102,7 +102,7 @@ static flex::CompositeAddress ComputeOffsetAddress(
               "job_allocation must have 1 chunk");
 
   // Calculate offset
-  uint64_t offset = dev_ptr - job_allocation_ptr_start;
+  uint64_t offset = dev_ptr - flex::PROG_OFFSET_NOSHIFT;
   if (size == 0) {
     size = job_allocation.total_size() - offset;
   }
