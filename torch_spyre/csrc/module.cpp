@@ -62,10 +62,10 @@ void set_downcast_warn_enabled(bool enabled) {
 
 // Optional: initialize from env at module init
 static void init_from_env() {
-  if (const char *v = std::getenv(SPYRE_DOWNCAST_ENV)) {
+  if (const char* v = std::getenv(SPYRE_DOWNCAST_ENV)) {
     // Accept 0/1, true/false, on/off
     std::string s(v);
-    for (auto &c : s) c = std::tolower(c);
+    for (auto& c : s) c = std::tolower(c);
     bool enable = !(s == "0" || s == "false" || s == "off");
     g_downcast_warn_enabled.store(enable, std::memory_order_relaxed);
   }
@@ -81,7 +81,7 @@ void _startRuntime() {
   int tls_idx = static_cast<int>(SpyreGuardImpl::tls_idx);
   if (tls_idx != 0) {
     logical_device_id = tls_idx;
-  } else if (const char *lr = std::getenv("LOCAL_RANK")) {
+  } else if (const char* lr = std::getenv("LOCAL_RANK")) {
     logical_device_id = std::atoi(lr);
   }
 
@@ -166,9 +166,9 @@ PYBIND11_MODULE(_C, m) {
       .def_readonly("stride_map", &spyre::SpyreTensorLayout::stride_map)
       .def_readonly("device_dtype", &spyre::SpyreTensorLayout::device_dtype)
       .def("__str__",
-           [](const spyre::SpyreTensorLayout &c) { return c.toString(); })
+           [](const spyre::SpyreTensorLayout& c) { return c.toString(); })
       .def("__repr__",
-           [](const spyre::SpyreTensorLayout &c) { return c.toString(); })
+           [](const spyre::SpyreTensorLayout& c) { return c.toString(); })
       .def("elems_per_stick", &spyre::SpyreTensorLayout::elems_per_stick)
       .def(py::self == py::self)
       .def("__hash__",
@@ -185,7 +185,7 @@ PYBIND11_MODULE(_C, m) {
            py::arg("device_size"), py::arg("stride_map"),
            py::arg("device_dtype"))
       .def(py::pickle(
-          [](const spyre::SpyreTensorLayout &p) {  // __getstate__
+          [](const spyre::SpyreTensorLayout& p) {  // __getstate__
             // Return a tuple that fully encodes the state of the object
             // If the pickle format changes, then update
             // kSpyreTensorLayoutPickleVersion but keep the tuple as the
@@ -250,7 +250,7 @@ PYBIND11_MODULE(_C, m) {
       .value("BFLOAT16", DataFormats::BFLOAT16)
       .value("SEN18F_FP24", DataFormats::SEN18F_FP24)
       .def("elems_per_stick",
-           [](const DataFormats &df) { return spyre::elems_per_stick(df); });
+           [](const DataFormats& df) { return spyre::elems_per_stick(df); });
 
   m.def("get_spyre_tensor_layout", &spyre::get_spyre_tensor_layout);
   m.def("set_spyre_tensor_layout", &spyre::set_spyre_tensor_layout);
@@ -293,7 +293,7 @@ PYBIND11_MODULE(_C, m) {
            "Get the device associated with this stream")
       .def("id", &spyre::SpyreStream::id, "Get the stream ID")
       .def("priority", &spyre::SpyreStream::priority, "Get the stream priority")
-      .def("__repr__", [](const spyre::SpyreStream &stream) {
+      .def("__repr__", [](const spyre::SpyreStream& stream) {
         return "<torch_spyre.Stream device=" +
                std::to_string(stream.device().index()) +
                " id=" + std::to_string(stream.id()) + ">";
@@ -314,34 +314,44 @@ PYBIND11_MODULE(_C, m) {
   m.def("device_count", &spyre::device_count);
 
   // PrepareKernel and JobPlan bindings
-  m.def("prepare_kernel", &spyre::PrepareKernel, py::arg("spyrecode_dir"),
-        "Prepare a kernel from a SpyreCode directory and return a JobPlan");
+  m.def(
+      "prepare_kernel",
+      [](const std::string& spyrecode_dir,
+         const spyre::SpyreStream* stream) -> std::unique_ptr<spyre::JobPlan> {
+        return spyre::PrepareKernel(spyrecode_dir, stream);
+      },
+      py::arg("spyrecode_dir"), py::arg("stream") = nullptr,
+      "Prepare a kernel from a SpyreCode directory and return a JobPlan.\n\n"
+      "Args:\n"
+      "    spyrecode_dir (str): Path to the SpyreCode directory\n"
+      "    stream (SpyreStream, optional): Stream to use for initialization "
+      "transfers.\n"
+      "        If None, uses the current stream. Defaults to None.");
 
   py::class_<spyre::JobPlan>(m, "JobPlan")
       .def(
           "num_steps",
-          [](const spyre::JobPlan &plan) { return plan.steps.size(); },
+          [](const spyre::JobPlan& plan) { return plan.steps.size(); },
           "Get the number of steps in the JobPlan")
       .def(
           "job_allocation_size",
-          [](const spyre::JobPlan &plan) {
+          [](const spyre::JobPlan& plan) {
             return plan.job_allocation.total_size();
           },
           "Get the size of the job allocation")
       .def(
           "get_step_type",
-          [](const spyre::JobPlan &plan, size_t idx) {
+          [](const spyre::JobPlan& plan, size_t idx) {
             TORCH_CHECK(idx < plan.steps.size(), "Step index out of range");
-            const auto &step = plan.steps[idx];
-            if (dynamic_cast<const spyre::JobPlanStepH2D *>(step.get())) {
+            const auto& step = plan.steps[idx];
+            if (dynamic_cast<const spyre::JobPlanStepH2D*>(step.get())) {
               return "H2D";
-            } else if (dynamic_cast<const spyre::JobPlanStepD2H *>(
-                           step.get())) {
+            } else if (dynamic_cast<const spyre::JobPlanStepD2H*>(step.get())) {
               return "D2H";
-            } else if (dynamic_cast<const spyre::JobPlanStepCompute *>(
+            } else if (dynamic_cast<const spyre::JobPlanStepCompute*>(
                            step.get())) {
               return "Compute";
-            } else if (dynamic_cast<const spyre::JobPlanStepHostCompute *>(
+            } else if (dynamic_cast<const spyre::JobPlanStepHostCompute*>(
                            step.get())) {
               return "HostCompute";
             } else {
@@ -349,7 +359,7 @@ PYBIND11_MODULE(_C, m) {
             }
           },
           py::arg("idx"), "Get the type of step at the given index")
-      .def("__repr__", [](const spyre::JobPlan &plan) {
+      .def("__repr__", [](const spyre::JobPlan& plan) {
         return "<JobPlan steps=" + std::to_string(plan.steps.size()) +
                " job_allocation_size=" +
                std::to_string(plan.job_allocation.total_size()) +

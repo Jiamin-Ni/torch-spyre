@@ -384,7 +384,7 @@ static void ExecuteInitTransfer(const nlohmann::json& init_cmd,
  * @return CompositeAddress allocated for the job_allocation during preparation
  */
 flex::CompositeAddress ExecuteJobPreparationPlan(
-    const nlohmann::json& job_prep_plan) {
+    const nlohmann::json& job_prep_plan, const SpyreStream& stream) {
   TORCH_CHECK(job_prep_plan.is_array() && job_prep_plan.size() >= 2,
               "JobPreparationPlan must be an array with at least 2 commands "
               "(1 Allocate and 1+ InitTransfer)");
@@ -393,7 +393,6 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
   flex::CompositeAddress job_allocation = ExecuteAllocate(job_prep_plan[0]);
 
   // Execute InitTransfer commands (remaining items)
-  auto stream = getCurrentStream();
   for (size_t i = 1; i < job_prep_plan.size(); ++i) {
     ExecuteInitTransfer(job_prep_plan[i], job_allocation, stream);
   }
@@ -443,7 +442,8 @@ std::unique_ptr<JobPlan> TranslateJobExecPlan(
 
 }  // namespace detail
 
-std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir) {
+std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir,
+                                       const SpyreStream* stream) {
   std::filesystem::path spyrecode_dir_path(spyrecode_dir);
 
   TORCH_CHECK(std::filesystem::exists(spyrecode_dir_path),
@@ -471,8 +471,11 @@ std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir) {
                   spyrecode_json["JobPreparationPlan"].is_array(),
               "SpyreCode JSON missing 'JobPreparationPlan' array");
 
-  flex::CompositeAddress job_allocation =
-      detail::ExecuteJobPreparationPlan(spyrecode_json["JobPreparationPlan"]);
+  // Use provided stream or get current stream
+  SpyreStream stream_to_use = stream ? *stream : getCurrentStream();
+
+  flex::CompositeAddress job_allocation = detail::ExecuteJobPreparationPlan(
+      spyrecode_json["JobPreparationPlan"], stream_to_use);
 
   TORCH_CHECK(spyrecode_json.contains("JobExecPlan") &&
                   spyrecode_json["JobExecPlan"].is_array(),

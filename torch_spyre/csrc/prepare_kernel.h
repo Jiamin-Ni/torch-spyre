@@ -23,6 +23,7 @@ namespace spyre {
 
 // Forward declarations
 class JobPlan;
+class SpyreStream;
 
 /**
  * @brief Prepare a kernel from a SpyreCode directory
@@ -32,8 +33,11 @@ class JobPlan;
  * input shapes from metadata.
  *
  * @param spyrecode_dir Path to the SpyreCode directory
+ * @param stream Optional stream to use for initialization transfers. If nullptr,
+ *               uses the current stream from getCurrentStream()
  * @return Prepared JobPlan
  */
-std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir);
+std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir,
+                                       const SpyreStream* stream = nullptr);
 
 }  // namespace spyre
