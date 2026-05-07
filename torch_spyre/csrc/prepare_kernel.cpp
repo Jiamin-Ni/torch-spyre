@@ -396,6 +396,7 @@ flex::CompositeAddress ExecuteJobPreparationPlan(
   for (size_t i = 1; i < job_prep_plan.size(); ++i) {
     ExecuteInitTransfer(job_prep_plan[i], job_allocation, stream);
   }
+  stream.synchronize();
 
   return job_allocation;
 }
