@@ -127,6 +127,8 @@ bool FileExists(const std::filesystem::path& path) {
  * @brief Helper to read entire file into string
  */
 std::string ReadFileToString(const std::filesystem::path& path) {
+  TORCH_CHECK(FileExists(path),
+              "Path does not exist, or not a regular file: ", path.string());
   std::ifstream file(path, std::ios::binary);
   TORCH_CHECK(file, "Failed to open file: ", path.string());
 
