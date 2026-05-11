@@ -33,8 +33,8 @@ class SpyreStream;
  * input shapes from metadata.
  *
  * @param spyrecode_dir Path to the SpyreCode directory
- * @param stream Optional stream to use for initialization transfers. If nullptr,
- *               uses the current stream from getCurrentStream()
+ * @param stream Optional stream to use for initialization transfers. If
+ * nullptr, uses the current stream from getCurrentStream()
  * @return Prepared JobPlan
  */
 std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir,
