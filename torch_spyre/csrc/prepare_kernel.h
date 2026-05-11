@@ -16,10 +16,13 @@
 
 #pragma once
 
+<<<<<<< HEAD
 #include <filesystem>  // NOLINT
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
+=======
+>>>>>>> e66b2a0 (add JobPlan launch)
 #include <string>
 
 #include "flex/flex.hpp"
