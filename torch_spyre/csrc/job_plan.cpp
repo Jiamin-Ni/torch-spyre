@@ -50,7 +50,7 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
           &(static_cast<SharedOwnerCtx*>(
                 tensor.storage().data_ptr().get_context())
                 ->composite_addr);
-      inp.push_back((address));
+      inp.push_back(address);
     }
 
     auto op =
@@ -63,8 +63,6 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
   return op;
 }
 
-// constexpr int64_t SegmentSize = 16LL * 1024 * 1024 * 1024;
-
 // convert CompositeAddress to address that host compute function expects
 int64_t convert_address(flex::CompositeAddress& composite_address) {
   size_t num_chunks = composite_address.chunks().size();
@@ -72,7 +70,7 @@ int64_t convert_address(flex::CompositeAddress& composite_address) {
 
   // TODO(jni): update once resolved on flex support
   // const auto& addr = composite_address.chunks().at(0).addr;
-  // int64_t address = addr.segment_id * SegmentSize + addr.offset;
+  // int64_t address = addr.segment_id * flex::SEGMENT_SIZE + addr.offset;
 
   TORCH_CHECK(false,
               "convert_address not yet implemented - waiting for flex support");

@@ -72,7 +72,7 @@ class TestPrepareKernel:
             json.dump(spyrecode_json, f, indent=2)
 
         # Create a dummy binary file
-        with open(os.path.join(spyrecode_dir, "init.bin"), "wb") as f:
+        with open(os.path.join(spyrecode_dir, "init_binary.bin"), "wb") as f:
             f.write(b"\x00" * 1024)
 
         return spyrecode_dir

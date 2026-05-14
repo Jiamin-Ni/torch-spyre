@@ -189,7 +189,7 @@ class JobPlanStepD2H final : public JobPlanStep {
 /**
  * @brief Device compute launch step
  *
- * Binary address resolved during PrepareKernel. construct() produces a
+ * All fields resolved during PrepareKernel. construct() produces a
  * RuntimeOperationCompute.
  */
 class JobPlanStepCompute final : public JobPlanStep {
@@ -198,6 +198,8 @@ class JobPlanStepCompute final : public JobPlanStep {
    * @brief Construct compute step
    *
    * @param binary_address Address of the program binary on device
+   * @param specialize_addresses Whether to specialize the compute operation
+   * with inputs and outputs addresses from the launch context
    */
   explicit JobPlanStepCompute(flex::CompositeAddress binary_address,
                               bool specialize_addresses)
