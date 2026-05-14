@@ -104,7 +104,7 @@ class JobPlanBuilder {
  * current stream from getCurrentStream()
  * @return Prepared JobPlan
  */
-std::unique_ptr<JobPlan> PrepareKernel(const std::string& spyrecode_dir,
+std::unique_ptr<JobPlan> prepareKernel(const std::string& spyrecode_dir,
                                        const SpyreStream* stream = nullptr);
 
 }  // namespace spyre

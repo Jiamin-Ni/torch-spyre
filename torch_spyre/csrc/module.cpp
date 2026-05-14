@@ -318,7 +318,7 @@ PYBIND11_MODULE(_C, m) {
       "prepare_kernel",
       [](const std::string& spyrecode_dir,
          const spyre::SpyreStream* stream) -> std::unique_ptr<spyre::JobPlan> {
-        return spyre::PrepareKernel(spyrecode_dir, stream);
+        return spyre::prepareKernel(spyrecode_dir, stream);
       },
       py::arg("spyrecode_dir"), py::arg("stream") = nullptr,
       "Prepare a kernel from a SpyreCode directory and return a JobPlan.\n\n"
