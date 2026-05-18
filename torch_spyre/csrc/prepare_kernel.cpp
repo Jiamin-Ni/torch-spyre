@@ -27,6 +27,7 @@
 
 #include "job_plan.h"
 #include "spyre_allocator.h"
+#include "util/spyrecode.h"
 
 namespace spyre {
 
@@ -273,20 +274,44 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnDevice(
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
     const nlohmann::json& cmd) {
-  // TODO(jni): create JobPlanStepHostCompute
-  TORCH_CHECK(false,
-              "ComputeOnHost not yet implemented - waiting for deeptools PR to "
-              "be merged");
-  return nullptr;
+  // Parse ohandle
+  TORCH_CHECK(cmd.contains("ohandle"),
+              "ComputeOnHost command missing 'ohandle' property");
+  std::string ohandle = cmd["ohandle"].get<std::string>();
+
+  // Allocate pinned buffer
+  auto it = pinned_buffer_map_.find(ohandle);
+  TORCH_CHECK(it == pinned_buffer_map_.end(), "ohandle '", ohandle,
+              "' already exists in pinned buffer map");
+  TORCH_CHECK(cmd.contains("size"),
+              "ComputeOnHost command missing 'size' property");
+  std::string size_str = cmd["size"].get<std::string>();
+  size_t buffer_size = std::stoull(size_str);
+  at::Tensor pinned_buffer = torch::empty(
+      {static_cast<int64_t>(buffer_size)},
+      torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
+  pinned_buffer_map_[ohandle] = pinned_buffer;
+
+  // TODO(jni): check on ihandle
+
+  // Parse hcm JSON
+  TORCH_CHECK(cmd.contains("hcm"),
+              "ComputeOnHost command missing 'hcm' property");
+  const nlohmann::json& hcm_json = cmd["hcm"];
+
+  // Create Hcm object and import from JSON string
+  auto hcm_data = std::make_unique<Hcm>();
+  std::string hcm_json_str = hcm_json.dump();
+  bool import_success = hcm_data->importJsonStr(hcm_json_str);
+  TORCH_CHECK(import_success, "Failed to import Hcm from JSON");
+
+  // Create and return JobPlanStepHostCompute
+  return std::make_unique<JobPlanStepHostCompute>(std::move(hcm_data),
+                                                  pinned_buffer.data_ptr());
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
     const nlohmann::json& cmd) {
-  // TODO(jni): create JobPlanStepH2D or JobPlanStepD2H
-  TORCH_CHECK(false,
-              "DataTransfer not yet implemented - waiting for deeptools PR to "
-              "be merged");
-
   // Extract direction: 0 = H2D, 1 = D2H
   TORCH_CHECK(cmd.contains("dirn"),
               "DataTransfer command missing 'dirn' property");
@@ -307,12 +332,15 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       std::string dev_ptr_str = cmd["dev_ptr"].get<std::string>();
       std::string size_str = cmd["size"].get<std::string>();
 
-      // TODO(jni): host_handle should contain info about the host buffer
-      // to be copied, figure out how and connect host_addr
       TORCH_CHECK(cmd.contains("host_handle"),
                   "DataTransfer H2D missing 'host_handle' property");
       std::string host_handle_str = cmd["host_handle"].get<std::string>();
-      void* host_addr = nullptr;
+
+      // Get host buffer from pinned_buffer_map_
+      auto it = pinned_buffer_map_.find(host_handle_str);
+      TORCH_CHECK(it != pinned_buffer_map_.end(), "Host handle '",
+                  host_handle_str, "' not found in pinned buffer map");
+      void* host_addr = it->second.data_ptr();
       uint64_t device_ptr = std::stoull(dev_ptr_str);
       size_t transfer_size = std::stoull(size_str);
 
@@ -335,14 +363,23 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       std::string dev_ptr_str = cmd["dev_ptr"].get<std::string>();
       std::string size_str = cmd["size"].get<std::string>();
 
-      // TODO(jni): host_handle should contain info about the host buffer
-      // to be copied to, figure out how and connect host_addr
       TORCH_CHECK(cmd.contains("host_handle"),
                   "DataTransfer D2H missing 'host_handle' property");
       std::string host_handle_str = cmd["host_handle"].get<std::string>();
-      void* host_addr = nullptr;
+
       uint64_t device_ptr = std::stoull(dev_ptr_str);
       size_t transfer_size = std::stoull(size_str);
+
+      // Allocate pinned buffer
+      auto it = pinned_buffer_map_.find(host_handle_str);
+      TORCH_CHECK(it == pinned_buffer_map_.end(), "Host handle '",
+                  host_handle_str, "' already exists in pinned buffer map");
+
+      at::Tensor pinned_buffer = torch::empty(
+          {static_cast<int64_t>(transfer_size)},
+          torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
+      pinned_buffer_map_[host_handle_str] = pinned_buffer;
+      void* host_addr = pinned_buffer.data_ptr();
 
       // Compute CompositeAddress with offset from device_addr
       flex::CompositeAddress comp_addr = compute_offset_address(
@@ -412,14 +449,21 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
   }
 
   // TODO(jni): expected_input_shapes to be added once provided in SpyreCode
-  // TODO(jni): pinned buffer to be added as std::map once HostCompute provided
-  // in SpyreCode Create and return the JobPlan Use brace initialization to
-  // construct JobPlan with moved members
+  // Create pinned_buffers vector from pinned_buffer_map_
+  // Move tensors from map to avoid unnecessary reference count increments
+  std::vector<at::Tensor> pinned_buffers;
+  pinned_buffers.reserve(pinned_buffer_map_.size());
+  for (auto& [ohandle, tensor] : pinned_buffer_map_) {
+    pinned_buffers.push_back(std::move(tensor));
+  }
+
+  // Create and return the JobPlan
+  // Use brace initialization to construct JobPlan with moved members
   return std::make_unique<JobPlan>(JobPlan{
       std::move(steps),                    // steps
       std::move(job_allocation_.value()),  // job_allocation
       {},                                  // expected_input_shapes
-      {}                                   // pinned_buffers
+      std::move(pinned_buffers)            // pinned_buffers
   });
 }
 

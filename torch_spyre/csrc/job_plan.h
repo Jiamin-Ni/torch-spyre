@@ -25,39 +25,14 @@
 #include <utility>
 #include <vector>
 
+#include "util/spyrecode.h"
+
 // Forward declarations for flex types
 namespace flex {
 class RuntimeOperation;
 }
 
 namespace spyre {
-
-/**
- * @brief Base class for host compute operation metadata
- *
- * This polymorphic base class allows different host compute operations
- * to define their own metadata structures while maintaining type safety
- * and avoiding JSON parsing overhead.
- */
-struct HostComputeMetadata {
-  virtual ~HostComputeMetadata() = default;
-};
-
-/**
- * @brief Function type for host-side computation operations
- *
- * This callable type represents host-side operations such as program
- * correction, collectives, and other host computations that need to be
- * executed as part of a job plan.
- *
- * @param metadata Reference to operation-specific metadata (contains buffer
- * sizes)
- * @param input_buffer Pointer to input buffer containing source data
- * @param output_buffer Pointer to output buffer for results
- */
-using HostComputeFunction =
-    std::function<void(HostComputeMetadata* metadata, void* output_buffer,
-                       const void* input_buffer)>;
 
 /**
  * @brief Context passed to JobPlanStep::construct() at launch time
@@ -217,16 +192,14 @@ class JobPlanStepCompute final : public JobPlanStep {
 /**
  * @brief Host-side computation step (e.g., program correction)
  *
- * The host function, compiler metadata, and a shared output buffer are stored
- * directly as members during PrepareKernel. The host function (e.g., the
- * program correction routine) is a predefined runtime function — SpyreCode's
- * ComputeOnHost command identifies which function to invoke, and torch-spyre
- * maps it to the corresponding built-in HostComputeFunction during SpyreCode
- * translation.
+ * Stores compiler metadata (Hcm) and a shared output buffer during
+ * PrepareKernel. The host computation uses
+ * deeptools::processComputeOnHostCommand which takes Hcm metadata and performs
+ * program correction or other host-side operations.
  *
  * The output buffer is a pointer to pinned host memory, shared
  * with the subsequent JobPlanStepH2D that transfers it to device. construct()
- * builds a closure capturing the function, metadata, composite addresses, and
+ * builds a closure capturing the metadata, composite addresses, and
  * the buffer, and produces a RuntimeOperationHostCallback.
  *
  * The shared buffer is allocated once during PrepareKernel and reused across
@@ -239,25 +212,18 @@ class JobPlanStepHostCompute final : public JobPlanStep {
   /**
    * @brief Construct host compute step
    *
-   * @param function Predefined runtime host compute function (e.g., program
-   *                 correction), selected during SpyreCode translation
-   * @param metadata Compiler-provided metadata (e.g., hcm.json / vdci.json
-   *                 describing how symbolic values must be interpreted)
+   * @param hcm Compiler-provided metadata from deeptools (contains vdci and
+   *            senConstants describing how symbolic values must be interpreted)
    * @param output_buffer Pinned host buffer (lifetime managed by JobPlan)
    */
-  JobPlanStepHostCompute(HostComputeFunction function,
-                         std::unique_ptr<HostComputeMetadata> metadata,
-                         void* output_buffer)
-      : function_(std::move(function)),
-        metadata_(std::move(metadata)),
-        output_buffer_(output_buffer) {}
+  JobPlanStepHostCompute(std::unique_ptr<Hcm> hcm, void* output_buffer)
+      : hcm_(std::move(hcm)), output_buffer_(output_buffer) {}
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
 
  private:
-  HostComputeFunction function_;
-  std::unique_ptr<HostComputeMetadata> metadata_;
+  std::unique_ptr<Hcm> hcm_;
   void* output_buffer_;  // Non-owning pointer (JobPlan owns the buffer)
 };
 

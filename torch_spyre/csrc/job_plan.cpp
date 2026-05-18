@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "spyre_allocator.h"
+#include "util/processSpyreCodeArtifacts.h"
 
 namespace spyre {
 
@@ -88,7 +89,7 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
     addresses[addr_idx++] = addr;
   }
   auto callback = [this, addresses](void*) {
-    function_(metadata_.get(), output_buffer_, &addresses);
+    deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, &addresses);
   };
 
   auto op = std::make_unique<flex::RuntimeOperationHostCallback>(

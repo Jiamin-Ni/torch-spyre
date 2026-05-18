@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "flex/flex.hpp"
@@ -143,6 +144,8 @@ class JobPlanBuilder {
   std::optional<flex::CompositeAddress> job_allocation_;
   /// Whether to bind inputs and outputs addresses for compute
   bool bind_io_addresses_;
+
+  std::unordered_map<std::string, at::Tensor> pinned_buffer_map_;
 
   /// Execute the job preparation plan (allocate + init transfers)
   void executeJobPreparationPlan();
