@@ -70,8 +70,8 @@ class JobPlanBuilder {
   /// Device memory allocation for the job (set during preparation and moved to
   /// JobPlan in translation)
   std::optional<flex::CompositeAddress> job_allocation_;
-  /// Whether to specialize addresses for compute
-  bool specialize_addresses_;
+  /// Whether to bind inputs and outputs addresses for compute
+  bool bind_io_addresses_;
 
   /// Execute the job preparation plan (allocate + init transfers)
   void executeJobPreparationPlan();

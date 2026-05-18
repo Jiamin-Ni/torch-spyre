@@ -43,7 +43,7 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepD2H::construct(
 
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
     LaunchContext& ctx) const {
-  if (specialize_addresses_) {
+  if (bind_io_addresses_) {
     std::vector<const flex::CompositeAddress*> inp;
     for (auto& tensor : ctx.inputs_outputs) {
       flex::CompositeAddress* address =

@@ -268,7 +268,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnDevice(
       compute_offset_address(job_allocation_.value(), job_bin_ptr);
   // Create RuntimeOperationCompute with the allocated program address
   return std::make_unique<JobPlanStepCompute>(std::move(job_bin_addr),
-                                              specialize_addresses_);
+                                              bind_io_addresses_);
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
@@ -395,9 +395,9 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
 
   // TODO(jni): check on the condition to specialize addresses
   if (job_exec_plan.size() > 1) {
-    specialize_addresses_ = false;
+    bind_io_addresses_ = false;
   } else {
-    specialize_addresses_ = true;
+    bind_io_addresses_ = true;
   }
 
   // Parse each command in the JobExecPlan and create JobPlanSteps

@@ -198,20 +198,20 @@ class JobPlanStepCompute final : public JobPlanStep {
    * @brief Construct compute step
    *
    * @param binary_address Address of the program binary on device
-   * @param specialize_addresses Whether to specialize the compute operation
-   * with inputs and outputs addresses from the launch context
+   * @param bind_io_addresses Whether to bind the compute operation
+   * with inputs and outputs addresses
    */
   explicit JobPlanStepCompute(flex::CompositeAddress binary_address,
-                              bool specialize_addresses)
+                              bool bind_io_addresses)
       : binary_address_(std::move(binary_address)),
-        specialize_addresses_(specialize_addresses) {}
+        bind_io_addresses_(bind_io_addresses) {}
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
 
  private:
   flex::CompositeAddress binary_address_;
-  bool specialize_addresses_;
+  bool bind_io_addresses_;
 };
 
 /**
