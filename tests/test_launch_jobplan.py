@@ -19,8 +19,6 @@ import os
 import pytest
 import torch
 
-from inductor.utils_inductor import compare_with_cpu
-
 
 class TestLaunchJobPlan:
     """Test suite for JobPlan-backed compiled op execution."""
@@ -28,11 +26,19 @@ class TestLaunchJobPlan:
     def test_dump_spyre_code_abs_matches_cpu(self):
         """Run a simple compiled op with `DUMP_SPYRE_CODE=1` and compare to CPU."""
         x = torch.randn(64, dtype=torch.float16)
+        cpu_result = torch.abs(x)
 
         previous = os.environ.get("DUMP_SPYRE_CODE")
         os.environ["DUMP_SPYRE_CODE"] = "1"
         try:
-            compare_with_cpu(torch.abs, x, run_eager=False)
+            # Compile and run on Spyre
+            compiled_fn = torch.compile(torch.abs, backend="inductor")
+            spyre_result = compiled_fn(x.to("spyre")).cpu()
+
+            # Compare results
+            torch.testing.assert_close(
+                spyre_result, cpu_result, atol=0.1, rtol=0.1, equal_nan=True
+            )
         finally:
             if previous is None:
                 del os.environ["DUMP_SPYRE_CODE"]
@@ -43,11 +49,19 @@ class TestLaunchJobPlan:
         """Run a simple compiled binary op with `DUMP_SPYRE_CODE=1` and compare to CPU."""
         x = torch.randn(64, dtype=torch.float16)
         y = torch.randn(64, dtype=torch.float16)
+        cpu_result = torch.mul(x, y)
 
         previous = os.environ.get("DUMP_SPYRE_CODE")
         os.environ["DUMP_SPYRE_CODE"] = "1"
         try:
-            compare_with_cpu(torch.mul, x, y, run_eager=False)
+            # Compile and run on Spyre
+            compiled_fn = torch.compile(torch.mul, backend="inductor")
+            spyre_result = compiled_fn(x.to("spyre"), y.to("spyre")).cpu()
+
+            # Compare results
+            torch.testing.assert_close(
+                spyre_result, cpu_result, atol=0.1, rtol=0.1, equal_nan=True
+            )
         finally:
             if previous is None:
                 del os.environ["DUMP_SPYRE_CODE"]
