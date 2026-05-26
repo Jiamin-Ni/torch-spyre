@@ -24,8 +24,11 @@ from utils_inductor import (
     compare_with_cpu,
     make_param_dict,
     unique_randn_along_dim,
+    shapes2key,
 )
 import utils_inductor
+from torch_spyre._inductor.dtype_ops import DtypeOpTable
+from torch_spyre._inductor.constants import IDENTITY_OP
 
 POINTWISE_UNARY_OPS_DICT = {
     "abs": torch.abs,
@@ -35,11 +38,13 @@ POINTWISE_UNARY_OPS_DICT = {
     "neg": torch.neg,
     "reciprocal": torch.reciprocal,
     "relu": torch.relu,
+    "sign": torch.sign,
     "sin": torch.sin,
     "tanh": torch.tanh,
 }
 
 POINTWISE_UNARY_OPS_FP32_DICT = {
+    "ceil": torch.ceil,
     "floor": torch.floor,
 }
 
@@ -233,6 +238,70 @@ def _compare_op_with_cpu(fn, op, *args, **kwargs):
         **kwargs,
     )
 
+
+ALL_DTYPES = [
+    torch.float32,
+    torch.float16,
+    torch.bfloat16,
+    torch.bool,
+]
+
+ALL_DTYPE_PAIRS = [(src, dst) for src in ALL_DTYPES for dst in ALL_DTYPES if src != dst]
+
+TO_DTYPE_OP_SHAPES_UNALIGNED = [
+    (4, 16),
+    (4, 68),
+]
+
+TO_DTYPE_OP_SHAPES_ALIGNED = [
+    (4, 64),
+    (4, 8, 128),
+    (2, 4, 8, 64),
+]
+
+TO_DTYPE_OP_SHAPES = TO_DTYPE_OP_SHAPES_UNALIGNED + TO_DTYPE_OP_SHAPES_ALIGNED
+
+
+def _dtype_name(dt):
+    return str(dt).split(".")[-1]
+
+
+TO_DTYPE_OP_MAP_PARAMS_SETS = {
+    f"{_dtype_name(src)}_to_{_dtype_name(dst)}": (src, dst)
+    for src, dst in ALL_DTYPE_PAIRS
+}
+
+TO_DTYPE_OP_PARAMS_SETS = {
+    f"{_dtype_name(src)}_to_{_dtype_name(dst)}_{shapes2key((shape,))}": (
+        cached_randn(shape, dtype=src),
+        dst,
+    )
+    for src, dst in DtypeOpTable.get_dtype_pairs()
+    for shape in TO_DTYPE_OP_SHAPES
+    if src != torch.bool and dst != torch.bool
+}
+
+TO_DTYPE_OP_EXPECT_FAIL = [
+    f"{_dtype_name(src)}_to_{_dtype_name(dst)}_{shapes2key((shape,))}"
+    for src, dst in DtypeOpTable.get_dtype_pairs()
+    for shape in TO_DTYPE_OP_SHAPES
+    if (shape == (4, 68) or DtypeOpTable.get_operator(src, dst) != IDENTITY_OP)
+]
+
+TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS = {
+    f"{_dtype_name(src)}_to_{_dtype_name(dst)}_{shapes2key((shape,))}": (
+        cached_randn(shape, dtype=src),
+        dst,
+    )
+    for src, dst in [(torch.float16, torch.float32)]
+    for shape in TO_DTYPE_OP_SHAPES
+}
+
+TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL = [
+    f"{_dtype_name(src)}_to_{_dtype_name(dst)}_{shapes2key((shape,))}"
+    for src, dst in [(torch.float16, torch.float32)]
+    for shape in TO_DTYPE_OP_SHAPES_UNALIGNED
+]
 
 FP32_EPS = torch.finfo(torch.float32).eps  # 1.1920928955078125e-07
 FP16_EPS = torch.finfo(torch.float16).eps  # 0.0009765625
@@ -471,6 +540,54 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d_dim_2": (2, cached_randn((12, 8, 25, 64))),
                 "4d_dim_3": (3, cached_randn((12, 8, 25, 64))),
             },
+        },
+        ("test_sub_scalar", "test_unary_op_cpu"): {
+            "ops_dict": {
+                "sub_scalar_5": lambda x: torch.sub(x, 5.0),
+                "sub_scalar_neg": lambda x: torch.sub(x, -3.5),
+                "sub_scalar_zero": lambda x: torch.sub(x, 0.0),
+            },
+            "param_sets": make_param_dict(
+                [
+                    ((256,),),
+                    ((67, 256),),
+                    ((67, 71, 256),),
+                ]
+            ),
+        },
+        ("test_sub_broadcast", "test_binary_op_cpu"): {
+            "ops_dict": {"sub": torch.sub},
+            "param_sets": {
+                "1d_2d": (
+                    cached_randn((256,)),
+                    cached_randn((67, 256)),
+                ),
+                "2d_3d": (
+                    cached_randn((71, 256)),
+                    cached_randn((67, 71, 256)),
+                ),
+                "scalar_broadcast": (
+                    cached_randn((1,)),
+                    cached_randn((67, 256)),
+                ),
+                "3d_4d": (
+                    cached_randn((12, 32, 64)),
+                    cached_randn((7, 12, 32, 64)),
+                ),
+            },
+        },
+        ("test_sub_alpha", "test_binary_op_cpu"): {
+            "ops_dict": {
+                "sub_alpha_2": lambda a, b: torch.sub(a, b, alpha=2.0),
+                "sub_alpha_0.5": lambda a, b: torch.sub(a, b, alpha=0.5),
+                "sub_alpha_neg": lambda a, b: torch.sub(a, b, alpha=-1.0),
+            },
+            "param_sets": make_param_dict(
+                [
+                    ((256,),) * 2,
+                    ((67, 256),) * 2,
+                ]
+            ),
         },
         (
             "test_alias_operands",
@@ -1810,6 +1927,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((256, 128), dtype=torch.float16),  # input
                     cached_randn((128), dtype=torch.float16),  # weight
                     torch.zeros([128], dtype=torch.float16),  # bias
+                ),
+                "2d_transposed": (
+                    cached_randn((128, 256), dtype=torch.float16).transpose(0, 1),
+                    cached_randn((128), dtype=torch.float16),
+                    torch.zeros([128], dtype=torch.float16),
                 ),
             },
         },
@@ -3255,6 +3377,18 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "67x71x256": (cached_randn((67, 71, 256), dtype=torch.float32),),
             },
         },
+        ("test_to_dtype_op_map", "test_to_dtype_op_map"): {
+            "param_sets": TO_DTYPE_OP_MAP_PARAMS_SETS,
+        },
+        ("test_to_dtype", "test_to_dtype_cpu"): {
+            "param_sets": TO_DTYPE_OP_PARAMS_SETS,
+            "expect_fail": TO_DTYPE_OP_EXPECT_FAIL,
+        },
+        ("test_round_trip_to_dtype", "test_round_trip_to_dtype_cpu"): {
+            "ops_dict": {"add": torch.add},
+            "param_sets": TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS,
+            "expect_fail": TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL,
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -3339,9 +3473,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_binary_op_cpu(self, op, x, y):
         # Eager mode support varies by op:
         # - torch.eq, torch.ge, torch.gt, torch.lt: work eagerly
-        # - torch.ne, torch.le: aten::ne.Tensor_out / aten::le.Tensor_out not registered
+        # - torch.le: aten::le.Tensor_out not registered
         # - torch.matmul: numerical divergence (close=False) in eager 2d case
-        eager_supported = op in (torch.eq, torch.ge, torch.gt, torch.lt)
+        eager_supported = op in (torch.eq, torch.ge, torch.gt, torch.lt, torch.ne)
         self.compare_with_cpu(op, x, y, run_eager=eager_supported)
 
     def test_linear_fn(self, x, weight, bias):
@@ -3357,6 +3491,78 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_addmm_cpu(self, input, mat1, mat2):
         # NOTE: relaxing atol from 2e-1 to 3e-1 for multi-dim work division
         self.compare_with_cpu(torch.addmm, input, mat1, mat2, atol=3e-1, rtol=2e-1)
+
+    def test_matmul_tiled_y(self):
+        # Inspired by granite code that broke with no covering tests.
+        # GQA pattern: y is a 5D contiguous buffer from clone(expand(...))
+        # giving tiled host coords where the reduction dim decomposes as
+        # floor(...) and Mod(...) over a single loop variable.
+        B, H_KV, GQA, S, D = 2, 8, 4, 128, 128
+        H = H_KV * GQA
+
+        def fn(x, kv_cache):
+            y = kv_cache.view(B, S, H_KV, D)
+            y = y.permute(0, 2, 1, 3)
+            y = y.unsqueeze(2)
+            y = y.expand(-1, -1, GQA, -1, -1)
+            y = y.clone()
+            return torch.bmm(
+                x.reshape(B * H, S, D),
+                y.reshape(B * H, S, D).transpose(1, 2),
+            )
+
+        x = torch.randn(B, H, S, D, dtype=torch.float16)
+        kv = torch.randn(B, S * H_KV, D, dtype=torch.float16)
+        self.compare_with_cpu(fn, x, kv, atol=0.5, rtol=0.1)
+
+    def test_matmul_tiled_x(self):
+        # Inspired by granite code that broke with no covering tests.
+        # x is a 4D contiguous buffer [B,S,H,D] giving tiled host coords
+        # where the reduction dim decomposes as floor(...) and Mod(...)
+        # over a single flat loop variable.
+        B, S, H, D = 2, 128, 32, 128
+
+        def fn(x_base, y):
+            x = x_base.clone()
+            return torch.matmul(x.reshape(B, S, H * D), y)
+
+        x = torch.randn(B, S, H, D, dtype=torch.float16) * 0.01
+        y = torch.randn(H * D, H * D, dtype=torch.float16) * 0.01
+        self.compare_with_cpu(fn, x, y, atol=0.5, rtol=0.1)
+
+    def test_matmul_1d_view_x(self):
+        # x is a 1D buffer viewed as 2D: inductor keeps the 1D buffer and uses
+        # a compound index, so reduction var must be found via symbol-set arithmetic.
+        A, B, C = 64, 128, 256
+
+        def fn(x, y):
+            return x.view(A, B) @ y
+
+        x = torch.rand(A * B, dtype=torch.float16) * 0.01
+        y = torch.rand(B, C, dtype=torch.float16) * 0.01
+        self.compare_with_cpu(fn, x, y, atol=0.5, rtol=0.1)
+
+    def test_matmul_1d_view_y(self):
+        # y is a 1D buffer viewed as 2D: same compound-index case but on y.
+        A, B, C = 64, 128, 256
+
+        def fn(x, y):
+            return x @ y.view(B, C)
+
+        x = torch.rand(A, B, dtype=torch.float16) * 0.01
+        y = torch.rand(B * C, dtype=torch.float16) * 0.01
+        self.compare_with_cpu(fn, x, y, atol=0.5, rtol=0.1)
+
+    def test_matmul_1d_view_xy(self):
+        # Both x and y are 1D buffers viewed as 2D.
+        A, B, C = 64, 128, 256
+
+        def fn(x, y):
+            return x.view(A, B) @ y.view(B, C)
+
+        x = torch.rand(A * B, dtype=torch.float16) * 0.01
+        y = torch.rand(B * C, dtype=torch.float16) * 0.01
+        self.compare_with_cpu(fn, x, y, atol=0.5, rtol=0.1)
 
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     @pytest.mark.filterwarnings("ignore:Backend Spyre does not support int64")
@@ -3940,28 +4146,19 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         self.compare_with_cpu(lambda x: torch.transpose(x, dim0, dim1), x)
 
     def test_transpose_2d_contiguous_cpu(self, dim0: int, dim1: int, x):
-        # Note: .contiguous() causes issues with eager mode, see https://github.com/torch-spyre/torch-spyre/issues/1149
-        self.compare_with_cpu(
-            lambda x: torch.transpose(x, dim0, dim1).contiguous(), x, run_eager=False
-        )
+        self.compare_with_cpu(lambda x: torch.transpose(x, dim0, dim1).contiguous(), x)
 
     def test_transpose_3d_cpu(self, dim0: int, dim1: int, x):
         self.compare_with_cpu(lambda x: torch.transpose(x, dim0, dim1), x)
 
     def test_transpose_3d_contiguous_cpu(self, dim0: int, dim1: int, x):
-        # Note: .contiguous() causes issues with eager mode, see https://github.com/torch-spyre/torch-spyre/issues/1149
-        self.compare_with_cpu(
-            lambda x: torch.transpose(x, dim0, dim1).contiguous(), x, run_eager=False
-        )
+        self.compare_with_cpu(lambda x: torch.transpose(x, dim0, dim1).contiguous(), x)
 
     def test_transpose_4d_cpu(self, dim0: int, dim1: int, x):
         self.compare_with_cpu(lambda x: torch.transpose(x, dim0, dim1), x)
 
     def test_transpose_4d_contiguous_cpu(self, dim0: int, dim1: int, x):
-        # Note: .contiguous() causes issues with eager mode, see https://github.com/torch-spyre/torch-spyre/issues/1149
-        self.compare_with_cpu(
-            lambda x: torch.transpose(x, dim0, dim1).contiguous(), x, run_eager=False
-        )
+        self.compare_with_cpu(lambda x: torch.transpose(x, dim0, dim1).contiguous(), x)
 
     def test_where_cpu(self, cond_op, x, y):
         # aten::where.self is not registered for the Spyre backend
@@ -3970,11 +4167,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         )
 
     def test_range_op(self, op, input, min, max, err):
-        # aten::clamp is not registered for Spyre eager dispatch; it uses the
-        # spyre::clamp custom op which only works inside torch.compile
-        self.compare_with_cpu(
-            lambda x: op(x, min, max), input, atol=err, rtol=err, run_eager=False
-        )
+        self.compare_with_cpu(lambda x: op(x, min, max), input, atol=err, rtol=err)
 
     def test_activation_cls(self, op, input, kwargs, err):
         # Spyre activation custom ops (e.g. spyre::gelu) have a pass-through
@@ -4467,6 +4660,46 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         # TODO(aviros): Add support for missing eager ops and debug remaining issues to match eager results
         self.compare_with_cpu(fn, q, k, v, cpu_compile=False, run_eager=False)
+
+    def test_to_dtype_op_map(self, src, dst):
+        result = DtypeOpTable.get_operator(src, dst)
+        conversions = DtypeOpTable.get_table()
+        if (src, dst) in conversions:
+            expected = conversions[(src, dst)]
+            assert result == expected, (
+                f"Expected {expected} for {src}->{dst}, got {result}"
+            )
+        else:
+            assert result is None, (
+                f"Expected None for unsupported {src}->{dst}, got {result}"
+            )
+
+    def test_to_dtype_cpu(self, x, dst_dtype):
+        def fn(x, dst_dtype):
+            return x.to(dtype=dst_dtype)
+
+        self.compare_with_cpu(
+            fn,
+            x,
+            dst_dtype,
+            cpu_compile=False,
+            run_eager=False,
+        )
+
+    def test_round_trip_to_dtype_cpu(self, op, x, dst_dtype):
+        def fn(op, x, dst_dtype):
+            y = x.to(dst_dtype)
+            z = op(y, y)
+            return z.to(x.dtype)
+
+        self.compare_with_cpu(
+            fn,
+            op,
+            x,
+            dst_dtype,
+            cpu_compile=False,
+            run_eager=False,
+        )
 
 
 if __name__ == "__main__":
