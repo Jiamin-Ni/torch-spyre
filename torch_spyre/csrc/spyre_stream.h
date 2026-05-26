@@ -21,11 +21,14 @@
 
 #include <vector>
 
-#include "job_plan.h"
 #include "module.h"
 #include "spyre_kernel.h"
 
 namespace spyre {
+
+// Forward declaration
+struct JobPlan;
+
 class SpyreStream {
  private:
   c10::Stream stream_;

@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "flex/flex.hpp"
+#include "job_plan.h"
 #include "logging.h"
 #include "module.h"
 #include "spyre_allocator.h"
@@ -242,6 +243,12 @@ void SpyreStream::executeProgramAsync(
 
 void SpyreStream::launch(const JobPlan& plan,
                          const std::vector<at::Tensor>& args) const {
+  // Validate all tensors are on Spyre device
+  for (size_t i = 0; i < args.size(); ++i) {
+    TORCH_CHECK(args[i].is_privateuseone(), "SpyreStream::launch: argument ", i,
+                " must be on Spyre device, got ", args[i].device());
+  }
+
   // Create launch context with tensor arguments
   LaunchContext ctx{args};
 

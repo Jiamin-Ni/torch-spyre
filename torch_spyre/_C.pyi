@@ -9,6 +9,7 @@ import typing
 
 __all__: list[str] = [
     "DataFormats",
+    "JobPlan",
     "SpyreTensorLayout",
     "_SpyreStreamBase",
     "current_stream",
