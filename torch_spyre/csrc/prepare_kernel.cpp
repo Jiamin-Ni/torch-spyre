@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -26,6 +27,7 @@
 #include <vector>
 
 #include "job_plan.h"
+#include "logging.h"
 #include "spyre_allocator.h"
 #include "util/spyrecode.h"
 
@@ -220,6 +222,8 @@ void JobPlanBuilder::executeInitTransfer(const nlohmann::json& cmd) {
   std::filesystem::path binary_path = spyrecode_dir_ / binary_file;
 
   std::string binary_data = read_file_to_string(binary_path);
+  std::cout << "binary_data: " << static_cast<const void*>(binary_data.data())
+            << ", " << binary_data.size() << ": " << binary_data << std::endl;
 
   TORCH_CHECK(init_props.contains("dev_ptr"),
               "InitTransfer command missing 'dev_ptr' property");
@@ -530,7 +534,12 @@ std::unique_ptr<JobPlan> JobPlanBuilder::build() {
 std::unique_ptr<JobPlan> prepareKernel(const std::string& spyrecode_dir,
                                        const SpyreStream* stream) {
   JobPlanBuilder builder(spyrecode_dir, stream);
-  return builder.build();
+  auto jobplan = builder.build();
+
+  // Dump JobPlan if debug logging is enabled
+  DEBUGINFO("JobPlan:\n", jobplan->toString());
+
+  return jobplan;
 }
 
 }  // namespace spyre

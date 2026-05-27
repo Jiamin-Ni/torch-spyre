@@ -20,8 +20,9 @@
 
 #include <cstdint>
 #include <flex/flex.hpp>
-#include <functional>
+#include <iostream>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -79,6 +80,13 @@ class JobPlanStep {
       LaunchContext& ctx) const = 0;
 
   /**
+   * @brief Dump step information for debugging
+   *
+   * @param os Output stream to write to
+   */
+  virtual void dump(std::ostream& os) const = 0;
+
+  /**
    * @brief Enable or disable pipeline barrier for this step
    *
    * Pipeline barriers control operation ordering within a stream. When enabled,
@@ -130,6 +138,8 @@ class JobPlanStepH2D final : public JobPlanStep {
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
 
+  void dump(std::ostream& os) const override;
+
  private:
   void* host_address_;  // Non-owning pointer (JobPlan owns the buffer)
   flex::CompositeAddress device_address_;
@@ -155,6 +165,8 @@ class JobPlanStepD2H final : public JobPlanStep {
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
+
+  void dump(std::ostream& os) const override;
 
  private:
   flex::CompositeAddress device_address_;
@@ -183,6 +195,8 @@ class JobPlanStepCompute final : public JobPlanStep {
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
+
+  void dump(std::ostream& os) const override;
 
  private:
   flex::CompositeAddress binary_address_;
@@ -221,6 +235,8 @@ class JobPlanStepHostCompute final : public JobPlanStep {
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
+
+  void dump(std::ostream& os) const override;
 
  private:
   std::unique_ptr<Hcm> hcm_;
@@ -298,7 +314,29 @@ struct JobPlan {
    * PrepareKernel. The pinned memory ensures efficient DMA transfers and
    * prevents OS from swapping pages to disk.
    */
+  // TODO(jni): not safe for multi-threading
   std::vector<torch::Tensor> pinned_buffers;
+
+  /**
+   * @brief Dump JobPlan information for debugging
+   *
+   * Outputs a human-readable summary of the JobPlan including step types,
+   * addresses, and metadata. Controlled by TORCH_SPYRE_DEBUG environment
+   * variable.
+   *
+   * @param os Output stream to write to (default: std::cout)
+   */
+  void dump(std::ostream& os = std::cout) const;
+
+  /**
+   * @brief Get string representation of JobPlan for debugging
+   *
+   * Returns a human-readable summary of the JobPlan including step types,
+   * addresses, and metadata. Equivalent to calling dump() with a stringstream.
+   *
+   * @return String containing the JobPlan information
+   */
+  std::string toString() const;
 };
 
 }  // namespace spyre
