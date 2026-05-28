@@ -196,7 +196,9 @@ void JobPlanBuilder::executeAllocate(const nlohmann::json& cmd) {
   size_t size = std::stoull(size_str);
 
   auto& allocator = SpyreAllocator::instance();
-  c10::DataPtr allocated_ptr = allocator.allocate(size);
+  flex::AllocationDirective directive(flex::PlacementPolicy::Bind, {0},
+                                      std::nullopt, flex::MemoryType::Program);
+  c10::DataPtr allocated_ptr = allocator.allocate(size, directive);
 
   job_allocation_ =
       std::move(static_cast<SharedOwnerCtx*>(allocated_ptr.get_context())
@@ -222,8 +224,6 @@ void JobPlanBuilder::executeInitTransfer(const nlohmann::json& cmd) {
   std::filesystem::path binary_path = spyrecode_dir_ / binary_file;
 
   std::string binary_data = read_file_to_string(binary_path);
-  std::cout << "binary_data: " << static_cast<const void*>(binary_data.data())
-            << ", " << binary_data.size() << ": " << binary_data << std::endl;
 
   TORCH_CHECK(init_props.contains("dev_ptr"),
               "InitTransfer command missing 'dev_ptr' property");
