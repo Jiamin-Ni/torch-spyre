@@ -115,8 +115,9 @@ static flex::CompositeAddress compute_offset_address(
 
   // Get the first chunk and add offset to its address
   const auto& base_chunk = job_allocation.chunks()[0];
-  flex::LogicalAddress offset_addr(base_chunk.addr.region_id,
-                                   base_chunk.addr.offset + offset);
+  // TODO(jni): temporary fix, to be updated once flex change in
+  flex::LogicalAddress offset_addr(
+      base_chunk.addr.region_id + base_chunk.addr.offset, offset);
   flex::Chunk offset_chunk(offset_addr, size, base_chunk.domain_id);
   return flex::CompositeAddress(offset_chunk);
 }
