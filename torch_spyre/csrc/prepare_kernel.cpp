@@ -296,6 +296,22 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
       torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
   pinned_buffer_map_[ohandle] = pinned_buffer;
 
+  // Parse ishape
+  // TODO(jni): further discussion is required on "ishape". For now, it's
+  // vector<int64_t>, and it's {0}, it's for fake symbols
+  TORCH_CHECK(cmd.contains("ishape"),
+              "ComputeOnHost command missing 'ishape' property");
+  const nlohmann::json& ishape_json = cmd["ishape"];
+  TORCH_CHECK(ishape_json.is_array(),
+              "ComputeOnHost 'ishape' must be an array");
+  std::vector<int64_t> ishape;
+  for (const auto& dim : ishape_json) {
+    TORCH_CHECK(dim.is_string(),
+                "ComputeOnHost 'ishape' elements must be strings");
+    std::string dim_str = dim.get<std::string>();
+    ishape.push_back(std::stoll(dim_str));
+  }
+
   // TODO(jni): check on ihandle
 
   // Parse hcm JSON
@@ -310,8 +326,8 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
   TORCH_CHECK(import_success, "Failed to import Hcm from JSON");
 
   // Create and return JobPlanStepHostCompute
-  return std::make_unique<JobPlanStepHostCompute>(std::move(hcm_data),
-                                                  pinned_buffer.data_ptr());
+  return std::make_unique<JobPlanStepHostCompute>(
+      std::move(hcm_data), pinned_buffer.data_ptr(), ishape);
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
@@ -434,12 +450,9 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
   auto job_exec_plan = spyrecode_json_["JobExecPlan"];
   TORCH_CHECK(job_exec_plan.is_array(), "JobExecPlan must be an array");
 
-  // TODO(jni): check on the condition to specialize addresses
-  if (job_exec_plan.size() > 1) {
-    bind_io_addresses_ = false;
-  } else {
-    bind_io_addresses_ = true;
-  }
+  // TODO(jni): further discussions is required on the condition to specialize
+  // addresses
+  bind_io_addresses_ = true;
 
   // Parse each command in the JobExecPlan and create JobPlanSteps
   std::vector<std::unique_ptr<JobPlanStep>> steps;

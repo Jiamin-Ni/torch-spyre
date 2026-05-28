@@ -230,8 +230,9 @@ class JobPlanStepHostCompute final : public JobPlanStep {
    *            senConstants describing how symbolic values must be interpreted)
    * @param output_buffer Pinned host buffer (lifetime managed by JobPlan)
    */
-  JobPlanStepHostCompute(std::unique_ptr<Hcm> hcm, void* output_buffer)
-      : hcm_(std::move(hcm)), output_buffer_(output_buffer) {}
+  JobPlanStepHostCompute(std::unique_ptr<Hcm> hcm, void* output_buffer,
+                         std::vector<int64_t> ishape)
+      : hcm_(std::move(hcm)), output_buffer_(output_buffer), ishape_(ishape) {}
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
@@ -241,6 +242,7 @@ class JobPlanStepHostCompute final : public JobPlanStep {
  private:
   std::unique_ptr<Hcm> hcm_;
   void* output_buffer_;  // Non-owning pointer (JobPlan owns the buffer)
+  std::vector<int64_t> ishape_;
 };
 
 /**

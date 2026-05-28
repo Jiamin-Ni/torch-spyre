@@ -66,7 +66,6 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
   return op;
 }
 
-// TODO(jni): move to flex
 // convert CompositeAddress to address that host compute function expects
 int64_t convert_address(flex::CompositeAddress& composite_address) {
   size_t num_chunks = composite_address.chunks().size();
@@ -76,14 +75,24 @@ int64_t convert_address(flex::CompositeAddress& composite_address) {
   // const auto& addr = composite_address.chunks().at(0).addr;
   // int64_t address = addr.segment_id * flex::SEGMENT_SIZE + addr.offset;
 
-  // TORCH_CHECK(false,
-  //             "convert_address not yet implemented - waiting for flex
-  //             support");
+  TORCH_CHECK(false,
+              "convert_address not yet implemented - waiting for flex support");
   return 0;
 }
 
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
     LaunchContext& ctx) const {
+  // fake symbols
+  if (ishape_.size() == 1 && ishape_[0] == 0) {
+    auto callback = [this](void*) {
+      deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, nullptr);
+    };
+    auto op = std::make_unique<flex::RuntimeOperationHostCallback>(
+        pipeline_barrier_, std::move(callback), nullptr);
+
+    return op;
+  }
+
   std::vector<int64_t> addresses(ctx.inputs_outputs.size());
   int addr_idx = 0;
   for (auto& tensor : ctx.inputs_outputs) {
@@ -92,9 +101,8 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
              ->composite_addr));
     addresses[addr_idx++] = addr;
   }
-  // TODO(jni): use nullptr for testing for now
   auto callback = [this, addresses](void*) {
-    deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, nullptr);
+    deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, &addresses);
   };
 
   auto op = std::make_unique<flex::RuntimeOperationHostCallback>(
