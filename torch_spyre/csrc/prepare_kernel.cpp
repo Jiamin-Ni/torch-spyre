@@ -115,9 +115,8 @@ static flex::CompositeAddress compute_offset_address(
 
   // Get the first chunk and add offset to its address
   const auto& base_chunk = job_allocation.chunks()[0];
-  // TODO(jni): temporary fix, to be updated once flex change in
-  flex::LogicalAddress offset_addr(
-      base_chunk.addr.region_id + base_chunk.addr.offset, offset);
+  flex::LogicalAddress offset_addr(base_chunk.addr.region_id,
+                                   base_chunk.addr.offset + offset);
   flex::Chunk offset_chunk(offset_addr, size, base_chunk.domain_id);
   return flex::CompositeAddress(offset_chunk);
 }
@@ -274,7 +273,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnDevice(
       compute_offset_address(job_allocation_.value(), job_bin_ptr);
   // Create RuntimeOperationCompute with the allocated program address
   return std::make_unique<JobPlanStepCompute>(std::move(job_bin_addr),
-                                              bind_io_addresses_);
+                                              bind_io_addresses_, job_bin_ptr);
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(

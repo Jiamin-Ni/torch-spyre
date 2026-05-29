@@ -56,8 +56,8 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
       inp.push_back(address);
     }
 
-    auto op =
-        std::make_unique<flex::RuntimeOperationCompute>(&binary_address_, inp);
+    auto op = std::make_unique<flex::RuntimeOperationCompute>(
+        &binary_address_, inp, "", bootstrap_addr_);
     op->setPipelineBarrier(pipeline_barrier_);
     return op;
   }

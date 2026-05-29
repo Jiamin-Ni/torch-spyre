@@ -186,12 +186,15 @@ class JobPlanStepCompute final : public JobPlanStep {
    *
    * @param binary_address Address of the program binary on device
    * @param bind_io_addresses Whether to bind the compute operation
+   * @param bootstrap_addr Bootstrap address for program execution
    * with inputs and outputs addresses
    */
   explicit JobPlanStepCompute(flex::CompositeAddress binary_address,
-                              bool bind_io_addresses)
+                              bool bind_io_addresses,
+                              uint64_t bootstrap_addr = flex::PROG_OFFSET_BASE)
       : binary_address_(std::move(binary_address)),
-        bind_io_addresses_(bind_io_addresses) {}
+        bind_io_addresses_(bind_io_addresses),
+        bootstrap_addr_(bootstrap_addr) {}
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
@@ -201,6 +204,7 @@ class JobPlanStepCompute final : public JobPlanStep {
  private:
   flex::CompositeAddress binary_address_;
   bool bind_io_addresses_;
+  uint64_t bootstrap_addr_;
 };
 
 /**
