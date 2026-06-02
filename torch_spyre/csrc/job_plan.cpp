@@ -111,45 +111,17 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
   return op;
 }
 
-namespace {
-
-// TODO(jni): move to flex
-// Helper function to format CompositeAddress for debugging
-std::string format_composite_address(const flex::CompositeAddress& addr) {
-  std::ostringstream oss;
-  const auto& chunks = addr.chunks();
-  if (chunks.empty()) {
-    oss << "<empty>";
-    return oss.str();
-  }
-
-  oss << "[";
-  for (size_t i = 0; i < chunks.size(); ++i) {
-    if (i > 0) oss << ", ";
-    const auto& chunk = chunks[i];
-    oss << "region=" << chunk.addr.region_id << " off=0x" << std::hex
-        << chunk.addr.offset << std::dec << " size=" << chunk.size
-        << " domain=" << chunk.domain_id;
-  }
-  oss << "]";
-  return oss.str();
-}
-
-}  // namespace
-
 void JobPlanStepH2D::dump(std::ostream& os) const {
   os << "  H2D (Host-to-Device)\n";
   os << "    Host address: " << host_address_ << "\n";
-  os << "    Device address: " << format_composite_address(device_address_)
-     << "\n";
+  os << "    Device address: " << device_address_ << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
 }
 
 void JobPlanStepD2H::dump(std::ostream& os) const {
   os << "  D2H (Device-to-Host)\n";
-  os << "    Device address: " << format_composite_address(device_address_)
-     << "\n";
+  os << "    Device address: " << device_address_ << "\n";
   os << "    Host address: " << host_address_ << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
@@ -157,8 +129,7 @@ void JobPlanStepD2H::dump(std::ostream& os) const {
 
 void JobPlanStepCompute::dump(std::ostream& os) const {
   os << "  Device Compute\n";
-  os << "    Binary address: " << format_composite_address(binary_address_)
-     << "\n";
+  os << "    Binary address: " << binary_address_ << "\n";
   os << "    Bind I/O addresses: " << (bind_io_addresses_ ? "yes" : "no")
      << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
@@ -180,8 +151,7 @@ std::string JobPlan::toString() const {
 
   // Job allocation
   if (!job_allocation.chunks().empty()) {
-    os << "Job allocation: " << format_composite_address(job_allocation)
-       << "\n";
+    os << "Job allocation: " << job_allocation << "\n";
   } else {
     os << "Job allocation: <none>\n";
   }
@@ -206,7 +176,6 @@ std::string JobPlan::toString() const {
     const auto& buf = pinned_buffers[i];
     os << "  Buffer " << i << ": ptr=" << buf.data_ptr()
        << ", size=" << buf.nbytes() << " bytes\n";
-    os << buf << std::endl;
   }
 
   // Detailed step information
