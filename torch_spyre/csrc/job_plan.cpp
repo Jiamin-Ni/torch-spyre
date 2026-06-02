@@ -18,8 +18,6 @@
 
 #include <iostream>
 #include <memory>
-#include <sstream>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -107,7 +105,8 @@ int64_t convert_address(flex::CompositeAddress& composite_address) {
 
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
     LaunchContext& ctx) const {
-  // fake symbols
+  // further discussion is required on "ishape". For now, it's vector<int64_t>,
+  // and it's {0}, it's for fake symbols
   if (ishape_.size() == 1 && ishape_[0] == 0) {
     auto callback = [this](void*) {
       deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, nullptr);

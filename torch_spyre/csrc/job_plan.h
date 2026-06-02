@@ -35,6 +35,9 @@ class RuntimeOperation;
 
 namespace spyre {
 
+// Note: host compute metadata is defined in deeptools as Hcm, and host compute
+// function is defined as deeptools::processComputeOnHostCommand
+
 /**
  * @brief Context passed to JobPlanStep::construct() at launch time
  *
