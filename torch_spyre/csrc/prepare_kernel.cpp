@@ -550,7 +550,7 @@ std::unique_ptr<JobPlan> prepareKernel(const std::string& spyrecode_dir,
   auto jobplan = builder.build();
 
   // Dump JobPlan if debug logging is enabled
-  DEBUGINFO("JobPlan:\n", jobplan->toString());
+  DEBUGINFO("JobPlan:\n", *jobplan);
 
   return jobplan;
 }

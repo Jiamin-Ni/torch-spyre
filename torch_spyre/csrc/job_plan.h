@@ -80,11 +80,14 @@ class JobPlanStep {
       LaunchContext& ctx) const = 0;
 
   /**
-   * @brief Dump step information for debugging
+   * @brief Write step information to output stream
+   *
+   * Pure virtual method for derived classes to implement their specific
+   * output format. Called by operator<<.
    *
    * @param os Output stream to write to
    */
-  virtual void dump(std::ostream& os) const = 0;
+  virtual void write(std::ostream& os) const = 0;
 
   /**
    * @brief Enable or disable pipeline barrier for this step
@@ -110,6 +113,18 @@ class JobPlanStep {
  protected:
   bool pipeline_barrier_ = false;
 };
+
+/**
+ * @brief Stream output operator for JobPlanStep
+ *
+ * @param os Output stream to write to
+ * @param step JobPlanStep to output
+ * @return Reference to the output stream
+ */
+inline std::ostream& operator<<(std::ostream& os, const JobPlanStep& step) {
+  step.write(os);
+  return os;
+}
 
 /**
  * @brief Host-to-device transfer step
@@ -138,7 +153,7 @@ class JobPlanStepH2D final : public JobPlanStep {
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
 
-  void dump(std::ostream& os) const override;
+  void write(std::ostream& os) const override;
 
  private:
   void* host_address_;  // Non-owning pointer (JobPlan owns the buffer)
@@ -166,7 +181,7 @@ class JobPlanStepD2H final : public JobPlanStep {
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
 
-  void dump(std::ostream& os) const override;
+  void write(std::ostream& os) const override;
 
  private:
   flex::CompositeAddress device_address_;
@@ -199,7 +214,7 @@ class JobPlanStepCompute final : public JobPlanStep {
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
 
-  void dump(std::ostream& os) const override;
+  void write(std::ostream& os) const override;
 
  private:
   flex::CompositeAddress binary_address_;
@@ -241,7 +256,7 @@ class JobPlanStepHostCompute final : public JobPlanStep {
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
 
-  void dump(std::ostream& os) const override;
+  void write(std::ostream& os) const override;
 
  private:
   std::unique_ptr<Hcm> hcm_;
@@ -322,27 +337,19 @@ struct JobPlan {
    */
   // TODO(jni): not safe for multi-threading
   std::vector<torch::Tensor> pinned_buffers;
-
-  /**
-   * @brief Dump JobPlan information for debugging
-   *
-   * Outputs a human-readable summary of the JobPlan including step types,
-   * addresses, and metadata. Controlled by TORCH_SPYRE_DEBUG environment
-   * variable.
-   *
-   * @param os Output stream to write to (default: std::cout)
-   */
-  void dump(std::ostream& os = std::cout) const;
-
-  /**
-   * @brief Get string representation of JobPlan for debugging
-   *
-   * Returns a human-readable summary of the JobPlan including step types,
-   * addresses, and metadata. Equivalent to calling dump() with a stringstream.
-   *
-   * @return String containing the JobPlan information
-   */
-  std::string toString() const;
 };
+
+/**
+ * @brief Stream output operator for JobPlan
+ *
+ * Outputs a human-readable summary of the JobPlan including step types,
+ * addresses, and metadata. Controlled by TORCH_SPYRE_DEBUG environment
+ * variable.
+ *
+ * @param os Output stream to write to
+ * @param plan JobPlan to output
+ * @return Reference to the output stream
+ */
+std::ostream& operator<<(std::ostream& os, const JobPlan& plan);
 
 }  // namespace spyre

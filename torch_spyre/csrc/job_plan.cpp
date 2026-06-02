@@ -36,12 +36,28 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepH2D::construct(
   return op;
 }
 
+void JobPlanStepH2D::write(std::ostream& os) const {
+  os << "  H2D (Host-to-Device)\n";
+  os << "    Host address: " << host_address_ << "\n";
+  os << "    Device address: " << device_address_ << "\n";
+  os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
+     << "\n";
+}
+
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepD2H::construct(
     LaunchContext&) const {
   auto op = std::make_unique<flex::RuntimeOperationD2H>(&device_address_,
                                                         host_address_);
   op->setPipelineBarrier(pipeline_barrier_);
   return op;
+}
+
+void JobPlanStepD2H::write(std::ostream& os) const {
+  os << "  D2H (Device-to-Host)\n";
+  os << "    Device address: " << device_address_ << "\n";
+  os << "    Host address: " << host_address_ << "\n";
+  os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
+     << "\n";
 }
 
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
@@ -64,6 +80,15 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
   auto op = std::make_unique<flex::RuntimeOperationCompute>(&binary_address_);
   op->setPipelineBarrier(pipeline_barrier_);
   return op;
+}
+
+void JobPlanStepCompute::write(std::ostream& os) const {
+  os << "  Device Compute\n";
+  os << "    Binary address: " << binary_address_ << "\n";
+  os << "    Bind I/O addresses: " << (bind_io_addresses_ ? "yes" : "no")
+     << "\n";
+  os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
+     << "\n";
 }
 
 // convert CompositeAddress to address that host compute function expects
@@ -111,32 +136,7 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
   return op;
 }
 
-void JobPlanStepH2D::dump(std::ostream& os) const {
-  os << "  H2D (Host-to-Device)\n";
-  os << "    Host address: " << host_address_ << "\n";
-  os << "    Device address: " << device_address_ << "\n";
-  os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
-     << "\n";
-}
-
-void JobPlanStepD2H::dump(std::ostream& os) const {
-  os << "  D2H (Device-to-Host)\n";
-  os << "    Device address: " << device_address_ << "\n";
-  os << "    Host address: " << host_address_ << "\n";
-  os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
-     << "\n";
-}
-
-void JobPlanStepCompute::dump(std::ostream& os) const {
-  os << "  Device Compute\n";
-  os << "    Binary address: " << binary_address_ << "\n";
-  os << "    Bind I/O addresses: " << (bind_io_addresses_ ? "yes" : "no")
-     << "\n";
-  os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
-     << "\n";
-}
-
-void JobPlanStepHostCompute::dump(std::ostream& os) const {
+void JobPlanStepHostCompute::write(std::ostream& os) const {
   os << "  Host Compute\n";
   os << "    Output buffer: " << output_buffer_ << "\n";
   os << "    HCM metadata: " << (hcm_ ? "present" : "null") << "\n";
@@ -144,53 +144,48 @@ void JobPlanStepHostCompute::dump(std::ostream& os) const {
      << "\n";
 }
 
-std::string JobPlan::toString() const {
-  std::ostringstream os;
+std::ostream& operator<<(std::ostream& os, const JobPlan& plan) {
   os << "============ JobPlan =============\n";
-  os << "Total steps: " << steps.size() << "\n";
+  os << "Total steps: " << plan.steps.size() << "\n";
 
   // Job allocation
-  if (!job_allocation.chunks().empty()) {
-    os << "Job allocation: " << job_allocation << "\n";
+  if (!plan.job_allocation.chunks().empty()) {
+    os << "Job allocation: " << plan.job_allocation << "\n";
   } else {
     os << "Job allocation: <none>\n";
   }
 
   // Expected input shapes
-  if (!expected_input_shapes.empty()) {
-    os << "Expected input shapes (" << expected_input_shapes.size()
+  if (!plan.expected_input_shapes.empty()) {
+    os << "Expected input shapes (" << plan.expected_input_shapes.size()
        << " tensors):\n";
-    for (size_t i = 0; i < expected_input_shapes.size(); ++i) {
+    for (size_t i = 0; i < plan.expected_input_shapes.size(); ++i) {
       os << "  Input " << i << ": [";
-      for (size_t j = 0; j < expected_input_shapes[i].size(); ++j) {
+      for (size_t j = 0; j < plan.expected_input_shapes[i].size(); ++j) {
         if (j > 0) os << ", ";
-        os << expected_input_shapes[i][j];
+        os << plan.expected_input_shapes[i][j];
       }
       os << "]\n";
     }
   }
 
   // Pinned buffers
-  os << "Pinned buffers: " << pinned_buffers.size() << "\n";
-  for (size_t i = 0; i < pinned_buffers.size(); ++i) {
-    const auto& buf = pinned_buffers[i];
+  os << "Pinned buffers: " << plan.pinned_buffers.size() << "\n";
+  for (size_t i = 0; i < plan.pinned_buffers.size(); ++i) {
+    const auto& buf = plan.pinned_buffers[i];
     os << "  Buffer " << i << ": ptr=" << buf.data_ptr()
        << ", size=" << buf.nbytes() << " bytes\n";
   }
 
   // Detailed step information
   os << "\nDetailed Steps:\n";
-  for (size_t i = 0; i < steps.size(); ++i) {
+  for (size_t i = 0; i < plan.steps.size(); ++i) {
     os << "Step " << i << ": ";
-    steps[i]->dump(os);
+    os << *plan.steps[i];
   }
 
   os << "==================================\n";
-  return os.str();
-}
-
-void JobPlan::dump(std::ostream& os) const {
-  os << toString();
+  return os;
 }
 
 }  // namespace spyre
