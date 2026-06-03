@@ -291,10 +291,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
               "ComputeOnHost command missing 'size' property");
   std::string size_str = cmd["size"].get<std::string>();
   size_t buffer_size = std::stoull(size_str);
-  at::Tensor pinned_buffer = torch::empty(
-      {static_cast<int64_t>(buffer_size)},
-      torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
-  pinned_buffer_map_[ohandle] = pinned_buffer;
+  pinned_buffer_map_[ohandle] = HostBuffer(buffer_size);
 
   // Parse ishape
   // TODO(jni): further discussion is required on "ishape". For now, it's
@@ -327,7 +324,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
 
   // Create and return JobPlanStepHostCompute
   return std::make_unique<JobPlanStepHostCompute>(
-      std::move(hcm_data), pinned_buffer.data_ptr(), ishape);
+      std::move(hcm_data), pinned_buffer_map_[ohandle].data(), ishape);
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
@@ -360,7 +357,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       auto it = pinned_buffer_map_.find(host_handle_str);
       TORCH_CHECK(it != pinned_buffer_map_.end(), "Host handle '",
                   host_handle_str, "' not found in pinned buffer map");
-      void* host_addr = it->second.data_ptr();
+      void* host_addr = it->second.data();
       uint64_t device_ptr = std::stoull(dev_ptr_str);
       size_t transfer_size = std::stoull(size_str);
 
@@ -395,11 +392,8 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       TORCH_CHECK(it == pinned_buffer_map_.end(), "Host handle '",
                   host_handle_str, "' already exists in pinned buffer map");
 
-      at::Tensor pinned_buffer = torch::empty(
-          {static_cast<int64_t>(transfer_size)},
-          torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
-      pinned_buffer_map_[host_handle_str] = pinned_buffer;
-      void* host_addr = pinned_buffer.data_ptr();
+      pinned_buffer_map_[host_handle_str] = HostBuffer(transfer_size);
+      void* host_addr = pinned_buffer_map_[host_handle_str].data();
 
       // Compute CompositeAddress with offset from device_addr
       flex::CompositeAddress comp_addr = compute_offset_address(
@@ -468,7 +462,7 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
   // TODO(jni): expected_input_shapes to be added once provided in SpyreCode
   // Create pinned_buffers vector from pinned_buffer_map_
   // Move tensors from map to avoid unnecessary reference count increments
-  std::vector<at::Tensor> pinned_buffers;
+  std::vector<HostBuffer> pinned_buffers;
   pinned_buffers.reserve(pinned_buffer_map_.size());
   for (auto& [ohandle, tensor] : pinned_buffer_map_) {
     pinned_buffers.push_back(std::move(tensor));

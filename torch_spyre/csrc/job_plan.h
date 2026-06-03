@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <sys/mman.h>
 #include <torch/types.h>
 
 #include <cstdint>
@@ -34,6 +35,144 @@ class RuntimeOperation;
 }
 
 namespace spyre {
+
+/**
+ * @brief RAII wrapper for page-aligned and pinned host memory
+ *
+ * Allocates CPU memory aligned to page boundaries. Attempts to pin memory, but
+ * gracefully falls back to unpinned memory if mlock fails.
+ *
+ * Memory is automatically freed and unpinned when the object is destroyed.
+ */
+class HostBuffer {
+ public:
+  /**
+   * @brief Default constructor - creates empty buffer
+   */
+  HostBuffer() = default;
+
+  /**
+   * @brief Allocate aligned and optionally pinned host memory
+   * @param size Size in bytes
+   * @param alignment Alignment in bytes (default: system page size)
+   */
+  explicit HostBuffer(size_t size, size_t alignment = 0)
+      : size_(size), pinned_(false) {
+    // Use system page size if alignment not specified
+    if (alignment == 0) {
+      alignment_ = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    } else {
+      alignment_ = alignment;
+    }
+
+    // 1. Allocate aligned memory
+    int ret = posix_memalign(&ptr_, alignment_, size_);
+    if (ret != 0 || ptr_ == nullptr) {
+      throw std::bad_alloc();
+    }
+
+    // 2. Try to pin memory
+    ret = mlock(ptr_, size_);
+    if (ret == 0) {
+      pinned_ = true;
+    } else {
+      // mlock failed - log warning but continue with unpinned memory
+      // Common reasons: insufficient ulimit -l, not enough RAM
+      TORCH_WARN_ONCE(
+          "mlock failed: ", std::strerror(errno), ". ",
+          "Using unpinned memory (still aligned). ",
+          "For best performance, run 'ulimit -l unlimited' before starting.");
+    }
+  }
+
+  ~HostBuffer() {
+    if (ptr_) {
+      if (pinned_) {
+        munlock(ptr_, size_);
+      }
+      std::free(ptr_);
+    }
+  }
+
+  // Disable copy (move-only)
+  HostBuffer(const HostBuffer&) = delete;
+  HostBuffer& operator=(const HostBuffer&) = delete;
+
+  // Enable move
+  HostBuffer(HostBuffer&& other) noexcept
+      : ptr_(other.ptr_),
+        size_(other.size_),
+        alignment_(other.alignment_),
+        pinned_(other.pinned_) {
+    other.ptr_ = nullptr;
+    other.size_ = 0;
+    other.alignment_ = 0;
+    other.pinned_ = false;
+  }
+
+  HostBuffer& operator=(HostBuffer&& other) noexcept {
+    if (this != &other) {
+      // Clean up current resources
+      if (ptr_) {
+        if (pinned_) {
+          munlock(ptr_, size_);
+        }
+        std::free(ptr_);
+      }
+
+      // Move from other
+      ptr_ = other.ptr_;
+      size_ = other.size_;
+      alignment_ = other.alignment_;
+      pinned_ = other.pinned_;
+
+      // Reset other
+      other.ptr_ = nullptr;
+      other.size_ = 0;
+      other.alignment_ = 0;
+      other.pinned_ = false;
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Get pointer to the allocated memory
+   * @return Pointer to aligned (and possibly pinned) memory
+   */
+  void* data() const {
+    return ptr_;
+  }
+
+  /**
+   * @brief Get size of the allocation
+   * @return Size in bytes
+   */
+  size_t size() const {
+    return size_;
+  }
+
+  /**
+   * @brief Get alignment of the allocation
+   * @return Alignment in bytes
+   */
+  size_t alignment() const {
+    return alignment_;
+  }
+
+  /**
+   * @brief Check if memory is pinned
+   * @return True if mlock succeeded, false otherwise
+   */
+  bool is_pinned() const {
+    return pinned_;
+  }
+
+ private:
+  void* ptr_ = nullptr;
+  size_t size_ = 0;
+  size_t alignment_ = 0;
+  bool pinned_ = false;
+};
 
 // Note: host compute metadata is defined in deeptools as Hcm, and host compute
 // function is defined as deeptools::processComputeOnHostCommand
@@ -334,12 +473,9 @@ struct JobPlan {
    * buffers via raw pointers. Buffers are automatically freed when JobPlan
    * is destroyed.
    *
-   * Allocated using torch::empty() with .pinned_memory(true) during
-   * PrepareKernel. The pinned memory ensures efficient DMA transfers and
-   * prevents OS from swapping pages to disk.
    */
-  // TODO(jni): not safe for multi-threading
-  std::vector<torch::Tensor> pinned_buffers;
+  // TODO(jni): not safe for multi streams. Make it per-stream.
+  std::vector<HostBuffer> pinned_buffers;
 };
 
 /**

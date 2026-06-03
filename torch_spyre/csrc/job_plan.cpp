@@ -172,8 +172,8 @@ std::ostream& operator<<(std::ostream& os, const JobPlan& plan) {
   os << "Pinned buffers: " << plan.pinned_buffers.size() << "\n";
   for (size_t i = 0; i < plan.pinned_buffers.size(); ++i) {
     const auto& buf = plan.pinned_buffers[i];
-    os << "  Buffer " << i << ": ptr=" << buf.data_ptr()
-       << ", size=" << buf.nbytes() << " bytes\n";
+    os << "  Buffer " << i << ": ptr=" << buf.data() << ", size=" << buf.size()
+       << " bytes\n";
   }
 
   // Detailed step information
