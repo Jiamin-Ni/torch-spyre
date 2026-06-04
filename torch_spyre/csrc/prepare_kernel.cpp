@@ -309,7 +309,18 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
     ishape.push_back(std::stoll(dim_str));
   }
 
-  // TODO(jni): check on ihandle
+  // Parse ihandle
+  void* inp_ptr = nullptr;
+  TORCH_CHECK(cmd.contains("ihandle"),
+              "ComputeOnHost command missing 'ihandle' property");
+  std::string ihandle = cmd["ihandle"].get<std::string>();
+  if (!ihandle.empty()) {
+    // Get input buffer from pinned_buffer_map_
+    it = pinned_buffer_map_.find(ihandle);
+    TORCH_CHECK(it != pinned_buffer_map_.end(), "ihandle '", ihandle,
+                "' not found in pinned buffer map");
+    inp_ptr = it->second.data();
+  }
 
   // Parse hcm JSON
   TORCH_CHECK(cmd.contains("hcm"),
@@ -324,7 +335,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
 
   // Create and return JobPlanStepHostCompute
   return std::make_unique<JobPlanStepHostCompute>(
-      std::move(hcm_data), pinned_buffer_map_[ohandle].data(), ishape);
+      std::move(hcm_data), pinned_buffer_map_[ohandle].data(), inp_ptr, ishape);
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(

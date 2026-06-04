@@ -390,10 +390,15 @@ class JobPlanStepHostCompute final : public JobPlanStep {
    * @param hcm Compiler-provided metadata from deeptools (contains vdci and
    *            senConstants describing how symbolic values must be interpreted)
    * @param output_buffer Pinned host buffer (lifetime managed by JobPlan)
+   * @param input_buffer Pinned host buffer (lifetime managed by JobPlan)
+   * @param ishape used for constructing input buffer
    */
   JobPlanStepHostCompute(std::unique_ptr<Hcm> hcm, void* output_buffer,
-                         std::vector<int64_t> ishape)
-      : hcm_(std::move(hcm)), output_buffer_(output_buffer), ishape_(ishape) {}
+                         const void* input_buffer, std::vector<int64_t> ishape)
+      : hcm_(std::move(hcm)),
+        output_buffer_(output_buffer),
+        input_buffer_(input_buffer),
+        ishape_(ishape) {}
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
@@ -402,7 +407,8 @@ class JobPlanStepHostCompute final : public JobPlanStep {
 
  private:
   std::unique_ptr<Hcm> hcm_;
-  void* output_buffer_;  // Non-owning pointer (JobPlan owns the buffer)
+  void* output_buffer_;       // Non-owning pointer (JobPlan owns the buffer)
+  const void* input_buffer_;  // Non-owning pointer (JobPlan owns the buffer)
   std::vector<int64_t> ishape_;
 };
 

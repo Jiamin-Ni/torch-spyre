@@ -105,18 +105,30 @@ int64_t convert_address(flex::CompositeAddress& composite_address) {
 
 std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
     LaunchContext& ctx) const {
-  // further discussion is required on "ishape". For now, it's vector<int64_t>,
-  // and it's {0}, it's for fake symbols
-  if (ishape_.size() == 1 && ishape_[0] == 0) {
-    auto callback = [this](void*) {
-      deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, nullptr);
-    };
-    auto op = std::make_unique<flex::RuntimeOperationHostCallback>(
-        pipeline_barrier_, std::move(callback), nullptr);
+  // Helper lambda to create RuntimeOperationHostCallback with given callback
+  auto make_host_callback_op = [this](auto&& callback) {
+    return std::make_unique<flex::RuntimeOperationHostCallback>(
+        pipeline_barrier_, std::forward<decltype(callback)>(callback), nullptr);
+  };
 
-    return op;
+  // Case 1: input_buffer_ is provided
+  if (input_buffer_ != nullptr) {
+    return make_host_callback_op([this](void*) {
+      deeptools::processComputeOnHostCommand(*hcm_, output_buffer_,
+                                             input_buffer_);
+    });
   }
 
+  // Case 2: fake symbols (ishape_ is {0})
+  // Further discussion is required on "ishape". For now, it's vector<int64_t>,
+  // and it's {0}, it's for fake symbols
+  if (ishape_.size() == 1 && ishape_[0] == 0) {
+    return make_host_callback_op([this](void*) {
+      deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, nullptr);
+    });
+  }
+
+  // Case 3: extract addresses from context tensors
   std::vector<int64_t> addresses(ctx.inputs_outputs.size());
   int addr_idx = 0;
   for (auto& tensor : ctx.inputs_outputs) {
@@ -125,14 +137,10 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepHostCompute::construct(
              ->composite_addr));
     addresses[addr_idx++] = addr;
   }
-  auto callback = [this, addresses](void*) {
+
+  return make_host_callback_op([this, addresses](void*) {
     deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, &addresses);
-  };
-
-  auto op = std::make_unique<flex::RuntimeOperationHostCallback>(
-      pipeline_barrier_, std::move(callback), nullptr);
-
-  return op;
+  });
 }
 
 void JobPlanStepHostCompute::write(std::ostream& os) const {
