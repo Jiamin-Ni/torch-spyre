@@ -17,6 +17,7 @@
 #include "prepare_kernel.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -457,7 +458,10 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
 
   // TODO(jni): further discussions is required on the condition to specialize
   // addresses
-  bind_io_addresses_ = true;
+  bind_io_addresses_ =
+      std::getenv("BUNDLE_SYMBOLIC_ARGS") != nullptr
+          ? std::string(std::getenv("BUNDLE_SYMBOLIC_ARGS")) != "1"
+          : true;
 
   // Parse each command in the JobExecPlan and create JobPlanSteps
   std::vector<std::unique_ptr<JobPlanStep>> steps;
