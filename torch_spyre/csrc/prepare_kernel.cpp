@@ -294,8 +294,8 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
   pinned_buffer_map_[ohandle] = HostBuffer(buffer_size);
 
   // Parse ishape
-  // TODO(jni): further discussion is required on "ishape". For now, it's
-  // vector<int64_t>, and it's {0}, it's for fake symbols
+  // TODO(jni): further discussion is required on "ishape". See #2522. For now,
+  // it's vector<int64_t>, and it's {0}, it's for fake symbols
   TORCH_CHECK(cmd.contains("ishape"),
               "ComputeOnHost command missing 'ishape' property");
   const nlohmann::json& ishape_json = cmd["ishape"];

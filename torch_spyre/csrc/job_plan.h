@@ -480,7 +480,7 @@ struct JobPlan {
    * is destroyed.
    *
    */
-  // TODO(jni): not safe for multi streams. Make it per-stream.
+  // TODO(jni): not safe for multi streams. Make it per-stream. See #2520.
   std::vector<HostBuffer> pinned_buffers;
 };
 
