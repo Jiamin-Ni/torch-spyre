@@ -2641,6 +2641,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "3d2s2": (2, 2, cached_randn((3, 3, 192), dtype=torch.float16)),
             },
         },
+        ("test_slice_synthetic_dims", "test_slice_synthetic_dims_cpu"): {
+            "param_sets": {
+                "5d": (cached_randn((2, 3, 4, 5, 192), dtype=torch.float16),),
+            },
+        },
         ("test_rope_fms", "test_rope_cpu"): {
             "param_sets": {
                 "prefill_bs1": (
@@ -3781,6 +3786,82 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "ops_dict": {"add": torch.add},
             "param_sets": TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS,
             "expect_fail": TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL,
+        },
+        ("test_conv2d", "test_conv2d_cpu"): {
+            "param_sets": {
+                "1x3x32_ksize3_no_pad": (
+                    cached_randn((1, 3, 32, 32)),
+                    cached_randn((16, 3, 3, 3)),
+                    None,
+                    (0, 0),
+                    (1, 1),
+                    1,
+                ),
+                "1x3x64_ksize3_pad1": (
+                    cached_randn((1, 3, 64, 64)),
+                    cached_randn((16, 3, 3, 3)),
+                    None,
+                    (1, 1),
+                    (1, 1),
+                    1,
+                ),
+                "2x3x32_ksize1": (
+                    cached_randn((2, 3, 32, 32)),
+                    cached_randn((8, 3, 1, 1)),
+                    None,
+                    (0, 0),
+                    (1, 1),
+                    1,
+                ),
+                "1x16x64_ksize3_pad1": (
+                    cached_randn((1, 16, 64, 64)),
+                    cached_randn((32, 16, 3, 3)),
+                    None,
+                    (1, 1),
+                    (1, 1),
+                    1,
+                ),
+                "1x64_ksize3_depthwise": (
+                    cached_randn((1, 64, 32, 32)),
+                    cached_randn((64, 1, 3, 3)),
+                    None,
+                    (1, 1),
+                    (1, 1),
+                    64,
+                ),
+                "mistral_model": (
+                    cached_randn((1, 3, 392, 532)),
+                    cached_randn((1024, 3, 14, 14)),
+                    None,
+                    (0, 0),
+                    (1, 1),
+                    1,
+                ),
+                "2x32_ksize1_stride2": (
+                    cached_randn((2, 32, 64, 64)),
+                    cached_randn((16, 32, 1, 1)),
+                    None,
+                    (0, 0),
+                    (2, 2),
+                    1,
+                ),
+                "1x3x128_ksize5": (
+                    cached_randn((1, 3, 128, 128)),
+                    cached_randn((8, 3, 5, 5)),
+                    None,
+                    (2, 2),
+                    (1, 1),
+                    1,
+                ),
+                "8x64_ksize3_pad1": (
+                    cached_randn((8, 64, 128, 128)),
+                    cached_randn((64, 1, 3, 3)),
+                    None,
+                    (1, 1),
+                    (1, 1),
+                    64,
+                ),
+            },
         },
         ("test_repeat", "test_repeat_cpu"): {
             "param_sets": {
@@ -5037,6 +5118,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         self.compare_with_cpu(fn, x, clone_inputs=True, run_eager=False)
 
+    def test_slice_synthetic_dims_cpu(self, x):
+        def fn(x):
+            return x[:, 1:2, :, :, :] + x[:, :, 2:3, :, :]
+
+        self.compare_with_cpu(fn, x, clone_inputs=True, run_eager=False)
+
     def test_rope_cpu(self, q, freqs):
         def fn(q, freqs):
             B, S, E = q.shape
@@ -5155,6 +5242,24 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
+    def test_conv2d_cpu(self, x, weight, bias, padding, stride, groups):
+        def fn(x, weight, bias, padding, stride, groups):
+            return torch.conv2d(
+                x, weight, bias, stride=stride, padding=padding, groups=groups
+            )
+
+        self.compare_with_cpu(
+            fn,
+            x,
+            weight,
+            bias,
+            padding,
+            stride,
+            groups,
+            atol=0.5,
+            rtol=0.1,
+        )
+
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     def test_index_copy_cpu(self):
         """Test torch.index_copy operation on Spyre matches CPU in eager mode.
@@ -5254,6 +5359,52 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
     def test_unbind_cpu(self, dim: int, x):
         self.compare_with_cpu(lambda a: torch.unbind(a, dim=dim), x)
+
+    @pytest.mark.xfail(
+        reason=(
+            "RESTICKIFY_OP does not support FP32 dtype "
+            "(stable error signature: Unsupported: ReStickifyOpHBM on DataFormats.IEEE_FP32)"
+        ),
+        strict=True,
+    )
+    def test_restickify_fp32_unsupported_xfail(self):
+        """Verify RESTICKIFY_OP correctly rejects FP32 dtype.
+
+        Operations that would trigger restickify (like transpose + pointwise)
+        should fail with Unsupported error when using FP32 tensors.
+        """
+        x = torch.randn((128, 128), dtype=torch.float32)
+        y = torch.randn((128, 128), dtype=torch.float32)
+        # Transpose creates layout incompatibility that triggers restickify
+        self.compare_with_cpu(
+            lambda x, y: x.t() + y,
+            x,
+            y,
+            run_eager=False,
+        )
+
+    @pytest.mark.xfail(
+        reason=(
+            "RESTICKIFY_OP does not support INT64 dtype "
+            "(stable error signature: Unsupported: ReStickifyOpHBM on DataFormats.INT32)"
+        ),
+        strict=True,
+    )
+    def test_restickify_int64_unsupported_xfail(self):
+        """Verify RESTICKIFY_OP correctly rejects INT64 dtype.
+
+        Operations that would trigger restickify (like transpose + pointwise)
+        should fail with Unsupported error when using INT64 tensors.
+        """
+        x = torch.randint(0, 100, (128, 128), dtype=torch.int64)
+        y = torch.randint(0, 100, (128, 128), dtype=torch.int64)
+        # Transpose creates layout incompatibility that triggers restickify
+        self.compare_with_cpu(
+            lambda x, y: x.t() + y,
+            x,
+            y,
+            run_eager=False,
+        )
 
 
 if __name__ == "__main__":
