@@ -87,12 +87,12 @@ void JobPlanStepCompute::write(std::ostream& os) const {
 
 // convert CompositeAddress to dmva
 static int64_t composite_address_to_dmva(
-    flex::CompositeAddress& composite_address) {
+    const flex::CompositeAddress& composite_address) {
   size_t num_chunks = composite_address.chunks().size();
   TORCH_CHECK(num_chunks == 1, "Interleaved not supported yet");
 
   const auto& addr = composite_address.chunks()[0].addr;
-  int64_t address = addr.segment_id * flex::SEGMENT_SIZE + addr.offset;
+  auto address = flex::SegmentByteOffset_todmva(addr.segment_id, addr.offset);
   return address;
 }
 
