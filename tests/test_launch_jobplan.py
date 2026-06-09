@@ -83,9 +83,7 @@ class TestLaunchJobPlan:
 
     def test_abs_matches_cpu_no_symbols(self):
         """Run compiled abs op without symbolic args and compare to CPU."""
-        assert run_compiled_op_in_subprocess(
-            "abs", {"DUMP_SPYRE_CODE": "1"}
-        )
+        assert run_compiled_op_in_subprocess("abs", {"DUMP_SPYRE_CODE": "1"})
 
     def test_abs_matches_cpu_with_symbols(self):
         """Run compiled abs op with symbolic args and compare to CPU."""
@@ -95,9 +93,7 @@ class TestLaunchJobPlan:
 
     def test_mul_matches_cpu_no_symbols(self):
         """Run compiled mul op without symbolic args and compare to CPU."""
-        assert run_compiled_op_in_subprocess(
-            "mul", {"DUMP_SPYRE_CODE": "1"}
-        )
+        assert run_compiled_op_in_subprocess("mul", {"DUMP_SPYRE_CODE": "1"})
 
     def test_mul_matches_cpu_with_symbols(self):
         """Run compiled mul op with symbolic args and compare to CPU."""
