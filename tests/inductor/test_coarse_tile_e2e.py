@@ -397,6 +397,8 @@ class TestCoarseTileSpyreHints(InductorTestCase):
 
         with (
             mock_patch(_LAUNCH_KERNEL),
+            mock_patch(_LAUNCH_JOBPLAN),
+            mock_patch(_PREPARE_KERNEL),
             mock_patch("subprocess.run", side_effect=_record_subprocess),
         ):
             _, source_codes = run_and_get_code(cfn, a_dev, b_dev, c_dev)
@@ -628,9 +630,9 @@ class TestCoarseTileSpyreHints(InductorTestCase):
         cfn = torch.compile(fn)
         with (
             mock_patch(_LAUNCH_KERNEL),
-            mock_patch("subprocess.run"),
             mock_patch(_LAUNCH_JOBPLAN),
             mock_patch(_PREPARE_KERNEL),
+            mock_patch("subprocess.run"),
         ):
             _, source_codes = run_and_get_code(cfn, x_dev)
         self.assertTrue(len(source_codes) > 0)
