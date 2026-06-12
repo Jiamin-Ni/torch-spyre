@@ -107,7 +107,7 @@ jobs:
     uses: ./.github/workflows/_test_matrix.yaml
     with:
       runner_label: linux_for_pr_tests
-      extra_test_flags: -v -s
+      extra_test_flags: -v
       checkout_pytorch: false
       torch_root: ''
       ref: ${{ inputs.ref || '' }}

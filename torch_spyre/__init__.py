@@ -332,5 +332,6 @@ def _autoload():
     os.environ.setdefault("DTLOG_LEVEL", "error")
     os.environ.setdefault("DUMP_SPYRE_CODE", "1")
 
+
 if not profiler.is_available():
     profiler = None
