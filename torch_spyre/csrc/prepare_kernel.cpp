@@ -244,6 +244,7 @@ void JobPlanBuilder::executeInitTransfer(const nlohmann::json& cmd) {
   stream_.copyProgramAsync(
       const_cast<void*>(static_cast<const void*>(binary_data.data())),
       &device_addr);
+  stream_.synchronize();
 }
 
 void JobPlanBuilder::executeJobPreparationPlan() {
@@ -259,7 +260,6 @@ void JobPlanBuilder::executeJobPreparationPlan() {
   for (size_t i = 1; i < job_prep_plan.size(); ++i) {
     executeInitTransfer(job_prep_plan[i]);
   }
-  stream_.synchronize();
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnDevice(
