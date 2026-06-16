@@ -27,7 +27,6 @@
 #include <utility>
 #include <vector>
 
-#include "flex/util/defines.hpp"
 #include "job_plan.h"
 #include "logging.h"
 #include "spyre_allocator.h"

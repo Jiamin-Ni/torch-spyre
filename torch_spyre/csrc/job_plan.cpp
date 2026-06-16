@@ -21,7 +21,6 @@
 #include <utility>
 #include <vector>
 
-#include "flex/util/defines.hpp"
 #include "spyre_allocator.h"
 #include "util/processSpyreCodeArtifacts.h"
 
