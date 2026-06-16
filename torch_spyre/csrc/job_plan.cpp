@@ -66,7 +66,7 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepD2H::construct(
   } else {
     // supports copying inputs from device to host
     if (bind_io_addresses_) {
-      TORCH_CHECK(flex::SegmentOffset(dmva_) != 0,
+      TORCH_CHECK(flex::SegmentOffset(dmva_) == 0,
                   "D2H device address is different from IO tensors");
       auto segment_id = flex::SegmentId(dmva_);
       const auto& tensor = ctx.inputs_outputs.at(segment_id);
