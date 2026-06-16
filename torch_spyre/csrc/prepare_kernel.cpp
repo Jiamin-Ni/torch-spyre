@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "flex/util/defines.hpp"
 #include "job_plan.h"
 #include "logging.h"
 #include "spyre_allocator.h"
@@ -411,11 +412,19 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       pinned_buffer_map_[host_handle_str] = HostBuffer(transfer_size);
       void* host_addr = pinned_buffer_map_[host_handle_str].data();
 
-      // Compute CompositeAddress with offset from device_addr
-      flex::CompositeAddress comp_addr = compute_offset_address(
-          job_allocation_.at(0), device_ptr, transfer_size);
-
-      return std::make_unique<JobPlanStepD2H>(std::move(comp_addr), host_addr);
+      // If device_ptr is in segment 7, calculate CompositeAddress and store it
+      // in JobPlanStepH2D. If device_ptr is in tensor segments, store
+      // device_ptr
+      if (flex::SegmentId(device_ptr) == flex::PROG_SEGMENT) {
+        // Compute CompositeAddress with offset from device_addr
+        flex::CompositeAddress comp_addr = compute_offset_address(
+            job_allocation_.at(0), device_ptr, transfer_size);
+        return std::make_unique<JobPlanStepD2H>(std::move(comp_addr), host_addr,
+                                                device_ptr, bind_io_addresses_);
+      } else {
+        return std::make_unique<JobPlanStepD2H>(std::nullopt, host_addr,
+                                                device_ptr, bind_io_addresses_);
+      }
     }
 
     case TransferDirection::Unknown:
