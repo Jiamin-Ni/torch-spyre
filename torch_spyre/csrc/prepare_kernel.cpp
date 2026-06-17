@@ -419,10 +419,12 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
         flex::CompositeAddress comp_addr = compute_offset_address(
             job_allocation_.at(0), device_ptr, transfer_size);
         return std::make_unique<JobPlanStepD2H>(std::move(comp_addr), host_addr,
-                                                device_ptr, bind_io_addresses_);
+                                                device_ptr);
       } else {
+        TORCH_CHECK(bind_io_addresses_ == true,
+                    "D2H dev_ptr must be in program segment.")
         return std::make_unique<JobPlanStepD2H>(std::nullopt, host_addr,
-                                                device_ptr, bind_io_addresses_);
+                                                device_ptr);
       }
     }
 

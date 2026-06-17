@@ -65,32 +65,17 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepD2H::construct(
     return op;
   } else {
     // supports copying inputs from device to host
-    if (bind_io_addresses_) {
-      TORCH_CHECK(flex::SegmentOffset(dmva_) == 0,
-                  "D2H device address is different from IO tensors");
-      auto segment_id = flex::SegmentId(dmva_);
-      const auto& tensor = ctx.inputs_outputs.at(segment_id);
-      auto op = std::make_unique<flex::RuntimeOperationD2H>(
-          &(static_cast<SharedOwnerCtx*>(
-                tensor.storage().data_ptr().get_context())
-                ->composite_addr),
-          host_address_);
-      op->setPipelineBarrier(pipeline_barrier_);
-      return op;
-    } else {
-      for (const auto& tensor : ctx.inputs_outputs) {
-        auto tensor_ctx = static_cast<SharedOwnerCtx*>(
-            tensor.storage().data_ptr().get_context());
-        auto dmva = composite_address_to_dmva(tensor_ctx->composite_addr);
-        if (dmva == dmva_) {
-          auto op = std::make_unique<flex::RuntimeOperationD2H>(
-              &(tensor_ctx->composite_addr), host_address_);
-          op->setPipelineBarrier(pipeline_barrier_);
-          return op;
-        }
-      }
-      TORCH_CHECK(false, "D2H device address is different from IO tensors");
-    }
+    TORCH_CHECK(flex::SegmentOffset(dmva_) == 0,
+                "D2H device address is different from IO tensors");
+    auto segment_id = flex::SegmentId(dmva_);
+    const auto& tensor = ctx.inputs_outputs.at(segment_id);
+    auto op = std::make_unique<flex::RuntimeOperationD2H>(
+        &(static_cast<SharedOwnerCtx*>(
+              tensor.storage().data_ptr().get_context())
+              ->composite_addr),
+        host_address_);
+    op->setPipelineBarrier(pipeline_barrier_);
+    return op;
   }
 }
 

@@ -316,14 +316,12 @@ class JobPlanStepD2H final : public JobPlanStep {
    * @param device_address Device memory address (optional)
    * @param host_address Host memory address (caller manages lifetime)
    * @param dmva Device memory virtual address
-   * @param bind_io_addresses Whether to bind I/O addresses
    */
   JobPlanStepD2H(std::optional<flex::CompositeAddress> device_address,
-                 void* host_address, uint64_t dmva, bool bind_io_addresses)
+                 void* host_address, uint64_t dmva)
       : device_address_(std::move(device_address)),
         host_address_(host_address),
-        dmva_(dmva),
-        bind_io_addresses_(bind_io_addresses) {}
+        dmva_(dmva) {}
 
   std::unique_ptr<flex::RuntimeOperation> construct(
       LaunchContext& ctx) const override;
@@ -334,7 +332,6 @@ class JobPlanStepD2H final : public JobPlanStep {
   std::optional<flex::CompositeAddress> device_address_;
   void* host_address_;
   uint64_t dmva_;
-  bool bind_io_addresses_;
 };
 
 /**
