@@ -55,10 +55,10 @@ static int64_t composite_address_to_dmva(
   auto address = flex::SegmentByteOffset_todmva(seg_id, addr.offset);
   return address;
 }
- 
-void JobPlanStepD2H::construct(LaunchContext&,
+
+void JobPlanStepD2H::construct(LaunchContext& ctx,
                                flex::RuntimeStream* flex_stream) const {
-  CompositeAddress* device_address_ptr;
+  const flex::CompositeAddress* device_address_ptr;
   if (device_address_.has_value()) {
     device_address_ptr = &(device_address_.value());
   } else {
@@ -67,9 +67,9 @@ void JobPlanStepD2H::construct(LaunchContext&,
                 "D2H device address is different from IO tensors");
     auto segment_id = flex::SegmentId(dmva_);
     const auto& tensor = ctx.inputs_outputs.at(segment_id);
-    device_address_ptr = &(static_cast<SharedOwnerCtx*>(
-              tensor.storage().data_ptr().get_context())
-              ->composite_addr);
+    device_address_ptr = &(
+        static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
+            ->composite_addr);
   }
   flex::DmaParams params(host_address_, device_address_ptr->total_size(),
                          /*to_device=*/false, device_address_ptr);
