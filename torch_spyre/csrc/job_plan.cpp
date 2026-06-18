@@ -58,23 +58,34 @@ static int64_t composite_address_to_dmva(
 
 void JobPlanStepD2H::construct(LaunchContext& ctx,
                                flex::RuntimeStream* flex_stream) const {
-  const flex::CompositeAddress* device_address_ptr;
   if (device_address_.has_value()) {
-    device_address_ptr = &(device_address_.value());
+    flex::DmaParams params(host_address_, device_address_.value().total_size(),
+                           /*to_device=*/false, &(device_address_.value()));
+    params.pipeline_barrier = pipeline_barrier_;
+    flex_stream->launchOperationD2H(&params);
   } else {
-    // supports copying inputs from device to host
-    TORCH_CHECK(flex::SegmentOffset(dmva_) == 0,
-                "D2H device address is different from IO tensors");
     auto segment_id = flex::SegmentId(dmva_);
     const auto& tensor = ctx.inputs_outputs.at(segment_id);
-    device_address_ptr = &(
+    const auto& tensor_address =
         static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
-            ->composite_addr);
+            ->composite_addr;
+    TORCH_CHECK(tensor_address.chunks().size() == 1,
+                "Tensor address must have 1 chunk");
+    const auto& base_chunk = tensor_address.chunks()[0];
+    flex::LogicalAddress offset_addr(
+        base_chunk.addr.region_id, base_chunk.addr.offset + dmva_ -
+                                       (segment_id << flex::SEGMENT_SIZE_BITS));
+    flex::Chunk offset_chunk(offset_addr, size_, base_chunk.domain_id);
+
+    // Create shared_ptr to manage lifetime - will be kept alive by callback
+    auto device_address =
+        std::make_shared<flex::CompositeAddress>(offset_chunk);
+
+    flex::DmaParams params(host_address_, device_address.get()->total_size(),
+                           /*to_device=*/false, device_address.get());
+    params.callback = [device_address](void*) {};
+    flex_stream->launchOperationD2H(&params);
   }
-  flex::DmaParams params(host_address_, device_address_ptr->total_size(),
-                         /*to_device=*/false, device_address_ptr);
-  params.pipeline_barrier = pipeline_barrier_;
-  flex_stream->launchOperationD2H(&params);
 }
 
 void JobPlanStepD2H::write(std::ostream& os) const {
