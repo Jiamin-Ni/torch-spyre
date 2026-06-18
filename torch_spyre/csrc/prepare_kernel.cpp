@@ -252,6 +252,9 @@ void JobPlanBuilder::executeJobPreparationPlan() {
               "JobPreparationPlan must be an array with at least 2 commands (1 "
               "Allocate and 1+ InitTransfer)");
 
+  job_allocation_.reserve(job_prep_plan.size());
+  inits_.reserve(job_prep_plan.size() - 1);
+
   // Execute Allocate command (first item)
   executeAllocate(job_prep_plan[0]);
 

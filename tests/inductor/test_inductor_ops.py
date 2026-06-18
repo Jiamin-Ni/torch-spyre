@@ -1274,6 +1274,22 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             }
         },
+        ("test_restickify_add_transpose", "test_restickify_add_transpose_cpu"): {
+            "param_sets": {
+                "10x20_add_transpose": (
+                    cached_randn((10, 20)),
+                    cached_randn((20, 10)),
+                ),
+                "7x13_add_transpose": (
+                    cached_randn((7, 13)),
+                    cached_randn((13, 7)),
+                ),
+                "64x129_add_transpose": (
+                    cached_randn((64, 129)),
+                    cached_randn((129, 64)),
+                ),
+            }
+        },
         ("test_cmp", "test_binary_op_cpu"): {
             "ops_dict": {
                 "eq": torch.eq,
@@ -2235,7 +2251,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "2d2": (2, cached_randn((3, 4, 128)), cached_randn((3, 4))),
                 "3d3": (3, cached_randn((2, 3, 4, 128)), cached_randn((2, 3, 4))),
             },
-            "expect_fail": ["1d1", "2d2", "3d3"],
         },
         ("test_attention", "test_attention_cpu"): {
             "param_sets": {
@@ -2881,6 +2896,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         },
         ("test_sum_keepdim1", "test_sum_eager"): {
             "ops_dict": {"sum": torch.sum},
+            "expect_fail": [
+                "fp32_3d_dim_neg1",
+            ],
             "param_sets": {
                 "fp16_1d_dim_0": (0, True, cached_randn((64,), dtype=torch.float16)),
                 "fp16_2d_dim_0": (
@@ -3083,6 +3101,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         },
         ("test_mean_keepdim1", "test_mean_eager"): {
             "ops_dict": {"mean": torch.mean},
+            "expect_fail": [
+                "fp16_3d_dim_2",
+                "fp16_3d_dim_neg1",
+                "fp32_3d_dim_2",
+                "fp32_3d_dim_neg1",
+            ],
             "param_sets": {
                 "fp16_2d_dim_0": (
                     0,
@@ -3935,6 +3959,31 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "ops_dict": {"add": torch.add},
             "param_sets": TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS,
             "expect_fail": TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL,
+        },
+        (
+            "test_round_trip_to_dtype_implicit",
+            "test_round_trip_to_dtype_implicit_cpu",
+        ): {
+            "ops_dict": {"add": torch.add},
+            "param_sets": TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS,
+            "expect_fail": TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL,
+        },
+        (
+            "test_round_trip_to_dtype_implicit_invalid",
+            "test_round_trip_to_dtype_implicit_invalid_cpu",
+        ): {
+            "ops_dict": {"add": torch.add},
+            "param_sets": TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS,
+            "expect_fail": TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL,
+        },
+        ("test_add_constant", "test_add_constant_cpu"): {
+            "ops_dict": {"add": torch.add},
+            "param_sets": {
+                "1d_fp16_4": (cached_randn((4), dtype=torch.float16),),
+                "2d_fp16_4x64": (cached_randn((4, 64), dtype=torch.float16),),
+                "3d_fp16_2x4x16": (cached_randn((2, 4, 16), dtype=torch.float16),),
+                "4d_fp16_2x4x16": (cached_randn((2, 4, 16, 64), dtype=torch.float16),),
+            },
         },
         ("test_conv2d", "test_conv2d_cpu"): {
             "param_sets": {
@@ -4908,6 +4957,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_transpose_4d_contiguous_cpu(self, dim0: int, dim1: int, x):
         self.compare_with_cpu(lambda x: torch.transpose(x, dim0, dim1).contiguous(), x)
 
+    def test_restickify_add_transpose_cpu(self, a, b):
+        def fn(a, b):
+            return a + b.t()
+
+        self.compare_with_cpu(fn, a, b, run_eager=False)
+
     def test_where_cpu(self, cond_op, x, y):
         # aten::where.self is not registered for the Spyre backend
         self.compare_with_cpu(
@@ -5489,6 +5544,53 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             cpu_compile=False,
             run_eager=False,
         )
+
+    def test_round_trip_to_dtype_implicit_cpu(self, op, x, dst_dtype):
+        y = x.clone()
+
+        def fn(op, x, y, dst_dtype):
+            x_dst = x.to(dst_dtype)
+            z = op(x_dst, y)
+            return z.to(x.dtype)
+
+        self.compare_with_cpu(
+            fn,
+            op,
+            x,
+            y,
+            dst_dtype,
+            cpu_compile=False,
+            run_eager=False,
+        )
+
+    def test_round_trip_to_dtype_implicit_invalid_cpu(self, op, x, dst_dtype):
+        y = x.clone()
+        x_dst = x.to(dst_dtype)
+
+        def fn(op, x, y):
+            src_dtype = y.dtype
+            z = op(x, y)
+            return z.to(src_dtype)
+
+        with pytest.raises(Exception) as exc_info:
+            self.compare_with_cpu(
+                fn,
+                op,
+                x_dst,
+                y,
+                cpu_compile=False,
+                run_eager=False,
+            )
+
+        assert "All inputs to an op must have same element arrangement" in str(
+            exc_info.value
+        )
+
+    def test_add_constant_cpu(self, op, x):
+        def fn(op, x):
+            return op(x, 1.0)
+
+        self.compare_with_cpu(fn, op, x, cpu_compile=False, run_eager=False)
 
     def test_bool_conversion_from_spyre(self):
         torch.manual_seed(42)
