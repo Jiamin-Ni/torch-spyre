@@ -80,7 +80,7 @@ void JobPlanStepD2H::write(std::ostream& os) const {
   if (device_address_.has_value()) {
     os << "    Device address: " << *device_address_ << "\n";
   } else {
-    os << "    Device hmva: " << dmva_ << "\n";
+    os << "    Device dmva: " << dmva_ << "\n";
   }
   os << "    Host address: " << host_address_ << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
