@@ -42,20 +42,6 @@ void JobPlanStepH2D::write(std::ostream& os) const {
      << "\n";
 }
 
-// TODO(jni): move to flex
-// convert CompositeAddress to dmva
-static int64_t composite_address_to_dmva(
-    const flex::CompositeAddress& composite_address) {
-  size_t num_chunks = composite_address.chunks().size();
-  TORCH_CHECK(num_chunks == 1, "Interleaved not supported yet");
-
-  const auto& addr = composite_address.chunks()[0].addr;
-  auto& allocator = SpyreAllocator::instance();
-  auto seg_id = allocator.segmentForRegion(addr.region_id);
-  auto address = flex::SegmentByteOffset_todmva(seg_id, addr.offset);
-  return address;
-}
-
 void JobPlanStepD2H::construct(LaunchContext& ctx,
                                const SpyreStream& stream) const {
   if (device_address_.has_value()) {
@@ -126,6 +112,20 @@ void JobPlanStepCompute::write(std::ostream& os) const {
      << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
+}
+
+// TODO(jni): move to flex
+// convert CompositeAddress to dmva
+static int64_t composite_address_to_dmva(
+    const flex::CompositeAddress& composite_address) {
+  size_t num_chunks = composite_address.chunks().size();
+  TORCH_CHECK(num_chunks == 1, "Interleaved not supported yet");
+
+  const auto& addr = composite_address.chunks()[0].addr;
+  auto& allocator = SpyreAllocator::instance();
+  auto seg_id = allocator.segmentForRegion(addr.region_id);
+  auto address = flex::SegmentByteOffset_todmva(seg_id, addr.offset);
+  return address;
 }
 
 void JobPlanStepHostCompute::construct(LaunchContext& ctx,
