@@ -22,16 +22,16 @@
 #include <vector>
 
 #include "spyre_allocator.h"
+#include "spyre_stream.h"
 #include "util/processSpyreCodeArtifacts.h"
 
 namespace spyre {
 
 void JobPlanStepH2D::construct(LaunchContext&,
-                               flex::RuntimeStream* flex_stream) const {
-  flex::DmaParams params(host_address_, device_address_.total_size(),
-                         /*to_device=*/true, &device_address_);
+                               const SpyreStream& stream) const {
+  flex::DmaParams params(host_address_, /*to_device=*/true, &device_address_);
   params.pipeline_barrier = pipeline_barrier_;
-  flex_stream->launchOperationH2D(&params);
+  stream.launchH2D(&params);
 }
 
 void JobPlanStepH2D::write(std::ostream& os) const {
@@ -57,12 +57,12 @@ static int64_t composite_address_to_dmva(
 }
 
 void JobPlanStepD2H::construct(LaunchContext& ctx,
-                               flex::RuntimeStream* flex_stream) const {
+                               const SpyreStream& stream) const {
   if (device_address_.has_value()) {
-    flex::DmaParams params(host_address_, device_address_.value().total_size(),
+    flex::DmaParams params(host_address_,
                            /*to_device=*/false, &(device_address_.value()));
     params.pipeline_barrier = pipeline_barrier_;
-    flex_stream->launchOperationD2H(&params);
+    stream.launchD2H(&params);
   } else {
     auto segment_id = flex::SegmentId(dmva_);
     const auto& tensor = ctx.inputs_outputs.at(segment_id);
@@ -81,10 +81,11 @@ void JobPlanStepD2H::construct(LaunchContext& ctx,
     auto device_address =
         std::make_shared<flex::CompositeAddress>(offset_chunk);
 
-    flex::DmaParams params(host_address_, device_address.get()->total_size(),
+    flex::DmaParams params(host_address_,
                            /*to_device=*/false, device_address.get());
+    params.pipeline_barrier = pipeline_barrier_;
     params.callback = [device_address](void*) {};
-    flex_stream->launchOperationD2H(&params);
+    stream.launchD2H(&params);
   }
 }
 
@@ -101,7 +102,7 @@ void JobPlanStepD2H::write(std::ostream& os) const {
 }
 
 void JobPlanStepCompute::construct(LaunchContext& ctx,
-                                   flex::RuntimeStream* flex_stream) const {
+                                   const SpyreStream& stream) const {
   std::vector<const flex::CompositeAddress*> tensor_allocs;
   if (bind_io_addresses_) {
     for (auto& tensor : ctx.inputs_outputs) {
@@ -115,7 +116,7 @@ void JobPlanStepCompute::construct(LaunchContext& ctx,
   flex::ComputeParams params(&binary_address_, std::move(tensor_allocs), "",
                              bootstrap_addr_);
   params.pipeline_barrier = pipeline_barrier_;
-  flex_stream->launchOperationCompute(&params);
+  stream.launchCompute(&params);
 }
 
 void JobPlanStepCompute::write(std::ostream& os) const {
@@ -128,12 +129,12 @@ void JobPlanStepCompute::write(std::ostream& os) const {
 }
 
 void JobPlanStepHostCompute::construct(LaunchContext& ctx,
-                                       flex::RuntimeStream* flex_stream) const {
+                                       const SpyreStream& stream) const {
   // Helper lambda to build HostCallbackParams and launch on the stream
-  auto launch_host_callback = [this, flex_stream](auto&& callback) {
+  auto launch_host_callback = [this, &stream](auto&& callback) {
     flex::HostCallbackParams params(std::forward<decltype(callback)>(callback),
                                     nullptr, pipeline_barrier_);
-    flex_stream->launchOperationHostCallback(&params);
+    stream.launchHostCallback(&params);
   };
 
   // Case 1: input_buffer_ is provided
