@@ -452,7 +452,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       // If device_ptr is in segment 7, calculate CompositeAddress and store it
       // in JobPlanStepH2D. If device_ptr is in tensor segments, store
       // device_ptr
-      if (flex::SegmentId(device_ptr) == flex::PROG_SEGMENT) {
+      if (flex::dmvaToSegmentId(device_ptr) == flex::PROG_SEGMENT) {
         // Compute CompositeAddress with offset from device_addr
         flex::CompositeAddress comp_addr = compute_offset_address(
             job_allocation_.at(0), device_ptr, transfer_size);

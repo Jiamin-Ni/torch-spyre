@@ -48,13 +48,14 @@ void JobPlanStepH2D::write(std::ostream& os) const {
 void JobPlanStepD2H::construct(LaunchContext& ctx,
                                const SpyreStream& stream) const {
   if (device_address_.has_value()) {
-    auto* params = flex::createDmaParams(host_address_, device_address_.value().total_size(),
-                           /*to_device=*/false, &(device_address_.value()));
-    params.pipeline_barrier = pipeline_barrier_;
+    auto* params = flex::createDmaParams(
+        host_address_, device_address_.value().total_size(),
+        /*to_device=*/false, &(device_address_.value()));
+    params->pipeline_barrier = pipeline_barrier_;
     stream.launchD2H(params);
     flex::destroyDmaParams(params);
   } else {
-    auto segment_id = flex::SegmentId(dmva_);
+    auto segment_id = flex::dmvaToSegmentId(dmva_);
     const auto& tensor = ctx.inputs_outputs.at(segment_id);
     const auto& tensor_address =
         static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
@@ -71,10 +72,11 @@ void JobPlanStepD2H::construct(LaunchContext& ctx,
     auto device_address =
         std::make_shared<flex::CompositeAddress>(offset_chunk);
 
-    auto* params = flex::createDmaParams(host_address_, device_address->total_size(),
-                           /*to_device=*/false, device_address.get());
-    params.pipeline_barrier = pipeline_barrier_;
-    params.callback = [device_address](void*) {};
+    auto* params =
+        flex::createDmaParams(host_address_, device_address->total_size(),
+                              /*to_device=*/false, device_address.get());
+    params->pipeline_barrier = pipeline_barrier_;
+    params->callback = [device_address](void*) {};
     stream.launchD2H(params);
     flex::destroyDmaParams(params);
   }
