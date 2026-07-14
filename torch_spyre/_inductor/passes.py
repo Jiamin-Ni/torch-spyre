@@ -59,7 +59,11 @@ from .propagate_layouts import (
     propagate_spyre_tensor_layouts,
 )
 from .optimize_restickify import optimize_restickify_locations
-from .insert_restickify import insert_restickify, finalize_layouts
+from .insert_restickify import (
+    finalize_layouts,
+    insert_post_mutation_restickify,
+    insert_restickify,
+)
 from .memory_planning import memory_planning
 from .work_division import (
     span_reduction,
@@ -68,7 +72,6 @@ from .work_division import (
 )
 from .pass_utils import apply_splits_from_index_coeff, iteration_space_from_op
 from .scratchpad.allocator import (
-    StrategyBCoOptimizingAllocator,
     scratchpad_planning,
 )
 from .fusion import spyre_fuse_nodes
@@ -76,7 +79,6 @@ from .scheduler import build_loop_scheduler_nodes
 from .constants import DEVICE_NAME
 from .deadcode_elimination import deadcode_elimination
 from .dedup_constants import dedup_and_promote_constants
-from .chunk_large_tensors import chunk_large_tensors
 from .coarse_tile import coarse_tile
 from .split_multi_ops import split_multi_ops, validate_ops
 
@@ -268,12 +270,6 @@ def _runs(*passes: Callable) -> Callable[[Callable], Callable]:
     return annotate
 
 
-@_runs(chunk_large_tensors)
-def _maybe_chunk_large_tensors(graph: GraphLowering) -> None:
-    if config.chunk_large_tensors:
-        chunk_large_tensors(graph)
-
-
 @_runs(
     reorder_unhinted_interlopers,
     hints_to_coarse_tile_groups,
@@ -305,10 +301,9 @@ def _distribute_work(graph: GraphLowering) -> None:
 def _maybe_scratchpad_planning(graph: GraphLowering) -> None:
     if not config.lx_planning:
         return
-    allocator = (
-        StrategyBCoOptimizingAllocator() if config.co_optimizing_lx_planning else None
-    )
-    scratchpad_planning(graph, allocator=allocator)
+    # The allocator (and its layout solver) is selected from config by
+    # scratchpad_planning -> select_allocator; no allocator wiring here.
+    scratchpad_planning(graph)
 
 
 class CustomPreSchedulingPasses:
@@ -338,12 +333,12 @@ class CustomPreSchedulingPasses:
             optimize_restickify_locations,
             finalize_layouts,
             insert_restickify,
+            insert_post_mutation_restickify,
             insert_bmm_padding,
             #
             dedup_and_promote_constants,
             #
             # Working Set Reduction
-            _maybe_chunk_large_tensors,
             propagate_named_dims,
             assign_dim_hints,
             _maybe_coarse_tile,
