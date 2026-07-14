@@ -56,6 +56,10 @@ void JobPlanStepD2H::construct(LaunchContext& ctx,
     flex::destroyDmaParams(params);
   } else {
     auto segment_id = flex::dmvaToSegmentId(dmva_);
+    TORCH_CHECK(segment_id < ctx.inputs_outputs.size(),
+                "D2H tensor-segment lookup out of range: segment ", segment_id,
+                " but only ", ctx.inputs_outputs.size(),
+                " launch args were provided");
     const auto& tensor = ctx.inputs_outputs.at(segment_id);
     const auto& tensor_address =
         static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
@@ -63,9 +67,13 @@ void JobPlanStepD2H::construct(LaunchContext& ctx,
     TORCH_CHECK(tensor_address.chunks().size() == 1,
                 "Tensor address must have 1 chunk");
     const auto& base_chunk = tensor_address.chunks()[0];
-    flex::LogicalAddress offset_addr(
-        base_chunk.addr.region_id, base_chunk.addr.offset + dmva_ -
-                                       (segment_id << flex::SEGMENT_SIZE_BITS));
+    uint64_t segment_offset = dmva_ - (segment_id << flex::SEGMENT_SIZE_BITS);
+    TORCH_CHECK(segment_offset + size_ <= tensor_address.total_size(),
+                "D2H transfer out of bounds: offset ", segment_offset,
+                " + size ", size_, " exceeds tensor allocation size ",
+                tensor_address.total_size());
+    flex::LogicalAddress offset_addr(base_chunk.addr.region_id,
+                                     base_chunk.addr.offset + segment_offset);
     flex::Chunk offset_chunk(offset_addr, size_, base_chunk.domain_id);
 
     // Create shared_ptr to manage lifetime - will be kept alive by callback
