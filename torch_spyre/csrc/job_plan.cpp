@@ -19,6 +19,7 @@
 #include <iostream>
 #include <memory>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "spyre_allocator.h"
@@ -47,15 +48,18 @@ void JobPlanStepH2D::write(std::ostream& os) const {
 
 void JobPlanStepD2H::construct(LaunchContext& ctx,
                                const SpyreStream& stream) const {
-  if (device_address_.has_value()) {
-    auto* params = flex::createDmaParams(
-        host_address_, device_address_.value().total_size(),
-        /*to_device=*/false, &(device_address_.value()));
+  if (std::holds_alternative<flex::CompositeAddress>(device_address_)) {
+    const auto& device_address =
+        std::get<flex::CompositeAddress>(device_address_);
+    auto* params =
+        flex::createDmaParams(host_address_, device_address.total_size(),
+                              /*to_device=*/false, &device_address);
     params->pipeline_barrier = pipeline_barrier_;
     stream.launchD2H(params);
     flex::destroyDmaParams(params);
   } else {
-    auto segment_id = flex::dmvaToSegmentId(dmva_);
+    const uint64_t dmva = std::get<Dmva>(device_address_).value;
+    auto segment_id = flex::dmvaToSegmentId(dmva);
     TORCH_CHECK(segment_id < ctx.inputs_outputs.size(),
                 "D2H tensor-segment lookup out of range: segment ", segment_id,
                 " but only ", ctx.inputs_outputs.size(),
@@ -67,7 +71,7 @@ void JobPlanStepD2H::construct(LaunchContext& ctx,
     TORCH_CHECK(tensor_address.chunks().size() == 1,
                 "Tensor address must have 1 chunk");
     const auto& base_chunk = tensor_address.chunks()[0];
-    uint64_t segment_offset = dmva_ - (segment_id << flex::SEGMENT_SIZE_BITS);
+    uint64_t segment_offset = dmva - (segment_id << flex::SEGMENT_SIZE_BITS);
     TORCH_CHECK(segment_offset + size_ <= tensor_address.total_size(),
                 "D2H transfer out of bounds: offset ", segment_offset,
                 " + size ", size_, " exceeds tensor allocation size ",
@@ -92,10 +96,11 @@ void JobPlanStepD2H::construct(LaunchContext& ctx,
 
 void JobPlanStepD2H::write(std::ostream& os) const {
   os << "  D2H (Device-to-Host)\n";
-  if (device_address_.has_value()) {
-    os << "    Device address: " << *device_address_ << "\n";
+  if (std::holds_alternative<flex::CompositeAddress>(device_address_)) {
+    os << "    Device address: "
+       << std::get<flex::CompositeAddress>(device_address_) << "\n";
   } else {
-    os << "    Device dmva: " << dmva_ << "\n";
+    os << "    Device dmva: " << std::get<Dmva>(device_address_).value << "\n";
   }
   os << "    Host address: " << host_address_ << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
