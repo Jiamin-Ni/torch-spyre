@@ -27,10 +27,13 @@
 
 namespace spyre {
 
-void JobPlanStepH2D::construct(LaunchContext&,
+void JobPlanStepH2D::construct(LaunchContext& ctx,
                                const SpyreStream& stream) const {
+  // Resolve the host source per launch: ring-backed sources pick this launch's
+  // slot from ctx.slot_index
+  void* host_address = resolveHostAddress(ctx);
   auto* params =
-      flex::createDmaParams(host_address_, device_address_.total_size(),
+      flex::createDmaParams(host_address, device_address_.total_size(),
                             /*to_device=*/true, &device_address_);
   params->pipeline_barrier = pipeline_barrier_;
   stream.launchH2D(params);
@@ -39,16 +42,20 @@ void JobPlanStepH2D::construct(LaunchContext&,
 
 void JobPlanStepH2D::write(std::ostream& os) const {
   os << "  H2D (Host-to-Device)\n";
-  os << "    Host address: " << host_address_ << "\n";
+  os << "    Host source: pinned buffer ring (" << host_ring_->slots.size()
+     << " slot(s), resolved at launch)\n";
   os << "    Device address: " << device_address_ << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
 }
 
-void JobPlanStepD2H::construct(LaunchContext&,
+void JobPlanStepD2H::construct(LaunchContext& ctx,
                                const SpyreStream& stream) const {
+  // Resolve the host source per launch: ring-backed sources pick this launch's
+  // slot from ctx.slot_index
+  void* host_address = resolveHostAddress(ctx);
   auto* params =
-      flex::createDmaParams(host_address_, device_address_.total_size(),
+      flex::createDmaParams(host_address, device_address_.total_size(),
                             /*to_device=*/false, &device_address_);
   params->pipeline_barrier = pipeline_barrier_;
   stream.launchD2H(params);
@@ -58,7 +65,8 @@ void JobPlanStepD2H::construct(LaunchContext&,
 void JobPlanStepD2H::write(std::ostream& os) const {
   os << "  D2H (Device-to-Host)\n";
   os << "    Device address: " << device_address_ << "\n";
-  os << "    Host address: " << host_address_ << "\n";
+  os << "    Host dest: pinned buffer ring (" << host_ring_->slots.size()
+     << " slot(s), resolved at launch)\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
 }
@@ -112,11 +120,13 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
     stream.launchHostCallback(params);
   };
 
-  // Case 1: input_buffer_ is provided
-  if (input_buffer_ != nullptr) {
-    launch_host_callback([this](void*) {
-      deeptools::processComputeOnHostCommand(*hcm_, output_buffer_,
-                                             input_buffer_);
+  void* output_buffer = output_ring_->slotFor(ctx.slot_index).data();
+  // Case 1: input_ring_ is provided
+  if (input_ring_ != nullptr) {
+    const void* input_buffer = input_ring_->slotFor(ctx.slot_index).data();
+    launch_host_callback([this, output_buffer, input_buffer](void*) {
+      deeptools::processComputeOnHostCommand(*hcm_, output_buffer,
+                                             input_buffer);
     });
     return;
   }
@@ -125,8 +135,8 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
   // Further discussion is required on "ishape". For now, it's vector<int64_t>,
   // and it's {0}, it's for fake symbols
   if (ishape_.size() == 1 && ishape_[0] == 0) {
-    launch_host_callback([this](void*) {
-      deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, nullptr);
+    launch_host_callback([this, output_buffer](void*) {
+      deeptools::processComputeOnHostCommand(*hcm_, output_buffer, nullptr);
     });
     return;
   }
@@ -142,14 +152,15 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
     addresses[addr_idx++] = addr;
   }
 
-  launch_host_callback([this, addresses](void*) {
-    deeptools::processComputeOnHostCommand(*hcm_, output_buffer_, &addresses);
+  launch_host_callback([this, output_buffer, addresses](void*) {
+    deeptools::processComputeOnHostCommand(*hcm_, output_buffer, &addresses);
   });
 }
 
 void JobPlanStepHostCompute::write(std::ostream& os) const {
   os << "  Host Compute\n";
-  os << "    Output buffer: " << output_buffer_ << "\n";
+  os << "    Output ring: " << (output_ring_ ? output_ring_->slots.size() : 0)
+     << " slot(s) (resolved at launch)\n";
   os << "    HCM metadata: " << (hcm_ ? "present" : "null") << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
@@ -184,12 +195,15 @@ std::ostream& operator<<(std::ostream& os, const JobPlan& plan) {
     }
   }
 
-  // Pinned buffers
-  os << "Pinned buffers: " << plan.pinned_buffers.size() << "\n";
-  for (size_t i = 0; i < plan.pinned_buffers.size(); ++i) {
-    const auto& buf = plan.pinned_buffers[i];
-    os << "  Buffer " << i << ": ptr=" << buf.data() << ", size=" << buf.size()
-       << " bytes\n";
+  // Pinned buffer rings (keyed by handle)
+  os << "Pinned buffer rings: " << plan.pinned_buffers.size() << "\n";
+  for (const auto& [handle, ring] : plan.pinned_buffers) {
+    os << "  Handle '" << handle << "': " << ring.slots.size() << " slot(s)\n";
+    for (size_t s = 0; s < ring.slots.size(); ++s) {
+      const auto& buf = ring.slots[s];
+      os << "    Slot " << s << ": ptr=" << buf.data()
+         << ", size=" << buf.size() << " bytes\n";
+    }
   }
 
   // Detailed step information

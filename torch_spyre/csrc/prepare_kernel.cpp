@@ -35,6 +35,29 @@
 namespace spyre {
 
 /**
+ * @brief Depth K of every pinned-buffer ring built during PrepareKernel
+ *
+ * K==1 gives one buffer per handle, reproducing the currnet single-buffer
+ * behavior exactly — correct while all work is submitted to a single FIFO
+ * stream. Overlapping host compute with device compute under the
+ * StreamSynchronizationSpec requires K>1 so successive launches rotate to
+ * distinct slots
+ */
+constexpr size_t kPinnedRingDepth = 1;
+
+/**
+ * @brief Build a PinnedBufferRing of kPinnedRingDepth buffers of `size` bytes
+ */
+static PinnedBufferRing makePinnedRing(size_t size) {
+  PinnedBufferRing ring;
+  ring.slots.reserve(kPinnedRingDepth);
+  for (size_t i = 0; i < kPinnedRingDepth; ++i) {
+    ring.slots.emplace_back(size);
+  }
+  return ring;
+}
+
+/**
  * @brief Enum for SpyreCode command types
  */
 enum class SpyreCodeCommandType {
@@ -393,7 +416,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
               "ComputeOnHost command missing 'ohandle' property");
   std::string ohandle = cmd["ohandle"].get<std::string>();
 
-  // Allocate pinned buffer
+  // Allocate the output pinned-buffer ring for this handle
   auto it = pinned_buffer_map_.find(ohandle);
   TORCH_CHECK(it == pinned_buffer_map_.end(), "ohandle '", ohandle,
               "' already exists in pinned buffer map");
@@ -403,7 +426,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
   size_t buffer_size = safe_stoull(size_str, "ComputeOnHost size");
 
   try {
-    pinned_buffer_map_[ohandle] = HostBuffer(buffer_size);
+    pinned_buffer_map_[ohandle] = makePinnedRing(buffer_size);
   }
   catch (const std::bad_alloc&) {
     TORCH_CHECK(false,
@@ -428,7 +451,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
   }
 
   // Parse ihandle
-  void* inp_ptr = nullptr;
+  PinnedBufferRing* inp_buffer = nullptr;
   TORCH_CHECK(cmd.contains("ihandle"),
               "ComputeOnHost command missing 'ihandle' property");
   std::string ihandle = cmd["ihandle"].get<std::string>();
@@ -437,7 +460,9 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
     it = pinned_buffer_map_.find(ihandle);
     TORCH_CHECK(it != pinned_buffer_map_.end(), "ihandle '", ihandle,
                 "' not found in pinned buffer map");
-    inp_ptr = it->second.data();
+    TORCH_CHECK(!it->second.slots.empty(), "ihandle '", ihandle,
+                "' ring has no slots");
+    inp_buffer = &it->second;
   }
 
   // Parse hcm JSON
@@ -457,9 +482,9 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
                 "': ", e.what());
   }
 
-  // Create and return JobPlanStepHostCompute
+  // Create and return JobPlanStepHostCompute.
   return std::make_unique<JobPlanStepHostCompute>(
-      std::move(hcm_data), pinned_buffer_map_[ohandle].data(), inp_ptr, ishape);
+      std::move(hcm_data), &pinned_buffer_map_[ohandle], inp_buffer, ishape);
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
@@ -488,11 +513,14 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
                   "DataTransfer H2D missing 'host_handle' property");
       std::string host_handle_str = cmd["host_handle"].get<std::string>();
 
-      // Get host buffer from pinned_buffer_map_
+      // Get the host source ring from pinned_buffer_map_ (produced by the
+      // paired ComputeOnHost). The step holds a non-owning ring pointer and
+      // resolves the per-launch slot inside construct(), so it reads the same
+      // slot its producer wrote for this launch.
       auto it = pinned_buffer_map_.find(host_handle_str);
       TORCH_CHECK(it != pinned_buffer_map_.end(), "Host handle '",
                   host_handle_str, "' not found in pinned buffer map");
-      void* host_addr = it->second.data();
+      const PinnedBufferRing* host_ring = &it->second;
       uint64_t device_ptr =
           safe_stoull(dev_ptr_str, "DataTransfer H2D dev_ptr");
       size_t transfer_size = safe_stoull(size_str, "DataTransfer H2D size");
@@ -501,7 +529,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       flex::CompositeAddress comp_addr = compute_offset_address(
           job_allocation_.at(0), device_ptr, transfer_size);
 
-      return std::make_unique<JobPlanStepH2D>(host_addr, std::move(comp_addr));
+      return std::make_unique<JobPlanStepH2D>(host_ring, std::move(comp_addr));
     }
 
     case TransferDirection::DeviceToHost: {
@@ -524,26 +552,29 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
           safe_stoull(dev_ptr_str, "DataTransfer D2H dev_ptr");
       size_t transfer_size = safe_stoull(size_str, "DataTransfer D2H size");
 
-      // Allocate pinned buffer
+      // Allocate the readback destination buffer. This is a plain D2H sink, not
+      // a producer/consumer ring shared with a HostCompute, so a fixed pointer
+      // (slot 0 of a depth-1 ring) is used regardless of kPinnedRingDepth. The
+      // JobPlan owns the buffer via pinned_buffer_map_.
       auto it = pinned_buffer_map_.find(host_handle_str);
       TORCH_CHECK(it == pinned_buffer_map_.end(), "Host handle '",
                   host_handle_str, "' already exists in pinned buffer map");
 
       try {
-        pinned_buffer_map_[host_handle_str] = HostBuffer(transfer_size);
+        pinned_buffer_map_[host_handle_str] = makePinnedRing(transfer_size);
       }
       catch (const std::bad_alloc&) {
         TORCH_CHECK(false,
                     "Failed to allocate pinned buffer for D2H transfer '",
                     host_handle_str, "', size=", transfer_size, " bytes");
       }
-      void* host_addr = pinned_buffer_map_[host_handle_str].data();
 
       // Compute CompositeAddress with offset from device_addr
       flex::CompositeAddress comp_addr = compute_offset_address(
           job_allocation_.at(0), device_ptr, transfer_size);
 
-      return std::make_unique<JobPlanStepD2H>(std::move(comp_addr), host_addr);
+      return std::make_unique<JobPlanStepD2H>(
+          std::move(comp_addr), &pinned_buffer_map_[host_handle_str]);
     }
 
     case TransferDirection::Unknown:
@@ -605,21 +636,13 @@ std::unique_ptr<JobPlan> JobPlanBuilder::translateJobExecPlan() {
   }
 
   // TODO(jni): expected_input_shapes to be added once provided in SpyreCode
-  // Create pinned_buffers vector from pinned_buffer_map_
-  // Move tensors from map to avoid unnecessary reference count increments
-  std::vector<HostBuffer> pinned_buffers;
-  pinned_buffers.reserve(pinned_buffer_map_.size());
-  for (auto& [ohandle, tensor] : pinned_buffer_map_) {
-    pinned_buffers.push_back(std::move(tensor));
-  }
-
   // Create and return the JobPlan
   // Use brace initialization to construct JobPlan with moved members
   return std::make_unique<JobPlan>(
-      JobPlan{std::move(steps),            // steps
-              std::move(job_allocation_),  // job_allocation
-              {},                          // expected_input_shapes
-              std::move(pinned_buffers),   // pinned_buffers
+      JobPlan{std::move(steps),               // steps
+              std::move(job_allocation_),     // job_allocation
+              {},                             // expected_input_shapes
+              std::move(pinned_buffer_map_),  // pinned_buffers
               std::move(inits_)});
 }
 

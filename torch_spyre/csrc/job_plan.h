@@ -24,6 +24,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -173,6 +174,33 @@ class HostBuffer {
   bool pinned_ = false;
 };
 
+/**
+ * @brief A ring of interchangeable pinned host buffers for one handle
+ *
+ */
+struct PinnedBufferRing {
+  /// K interchangeable buffers. Steps resolve `slotFor(ctx.slot_index).data()`
+  /// at launch time so successive launches land on different buffers.
+  std::vector<HostBuffer> slots;
+
+  /**
+   * @brief Select this launch's buffer from the ring
+   *
+   * @param launch_index Monotonic per-launch counter
+   * (LaunchContext::slot_index)
+   * @return The HostBuffer for this launch: slots[launch_index % K]
+   */
+  HostBuffer& slotFor(size_t launch_index) {
+    TORCH_CHECK(!slots.empty(), "PinnedBufferRing has no slots");
+    return slots[launch_index % slots.size()];
+  }
+
+  const HostBuffer& slotFor(size_t launch_index) const {
+    TORCH_CHECK(!slots.empty(), "PinnedBufferRing has no slots");
+    return slots[launch_index % slots.size()];
+  }
+};
+
 // Note: host compute metadata is defined in deeptools as Hcm, and host compute
 // function is defined as deeptools::processComputeOnHostCommand
 
@@ -188,6 +216,18 @@ struct LaunchContext {
    *
    */
   const std::vector<at::Tensor>& inputs_outputs;
+
+  /**
+   * @brief Which pinned-buffer ring slot this launch uses
+   *
+   * Steps that reference a PinnedBufferRing resolve their host pointer as
+   * `ring.slotFor(slot_index).data()` inside construct(), so a given launch's
+   * HostCompute and its paired H2D land on the *same* slot while successive
+   * launches rotate to different slots. Defaults to 0, which — combined with a
+   * ring depth of K==1 — reproduces today's single-buffer, single-FIFO-stream
+   * behavior exactly.
+   */
+  size_t slot_index = 0;
 };
 
 /**
@@ -275,30 +315,31 @@ inline std::ostream& operator<<(std::ostream& os, const JobPlanStep& step) {
  * All fields resolved during PrepareKernel. construct() produces a
  * RuntimeOperationH2D.
  *
- * When used for correction tensor DMA, the host_address points into a pinned
- * host buffer allocated during PrepareKernel and shared with the
- * JobPlanStepHostCompute that writes into it. The buffer is allocated once and
- * reused across launches — FIFO ordering within a stream guarantees the
- * HostCompute callback writes the buffer before the H2D reads it.
  */
 class JobPlanStepH2D final : public JobPlanStep {
  public:
   /**
-   * @brief Construct H2D step with raw host pointer
+   * @brief Construct H2D step
    *
-   * @param host_address Host memory address (lifetime managed by JobPlan)
+   * @param host_ring Non-owning pointer to the ring (JobPlan owns the ring)
    * @param device_address Device memory address
    */
-  JobPlanStepH2D(void* host_address, flex::CompositeAddress device_address)
-      : host_address_(host_address),
-        device_address_(std::move(device_address)) {}
+  JobPlanStepH2D(const PinnedBufferRing* host_ring,
+                 flex::CompositeAddress device_address)
+      : host_ring_(host_ring), device_address_(std::move(device_address)) {}
 
   void construct(LaunchContext& ctx, const SpyreStream& stream) const override;
 
   void write(std::ostream& os) const override;
 
  private:
-  void* host_address_;  // Non-owning pointer (JobPlan owns the buffer)
+  /// Resolve the host source pointer for this launch. When backed by a ring the
+  /// slot is chosen from ctx.slot_index
+  void* resolveHostAddress(const LaunchContext& ctx) const {
+    return host_ring_->slotFor(ctx.slot_index).data();
+  }
+
+  const PinnedBufferRing* host_ring_;  // Non-owning (JobPlan owns the ring)
   flex::CompositeAddress device_address_;
 };
 
@@ -314,19 +355,25 @@ class JobPlanStepD2H final : public JobPlanStep {
    * @brief Construct D2H step
    *
    * @param device_address Device memory address
-   * @param host_address Host memory address (caller manages lifetime)
+   * @param host_ring Non-owning pointer to the ring (JobPlan owns the ring)
    */
-  JobPlanStepD2H(flex::CompositeAddress device_address, void* host_address)
-      : device_address_(std::move(device_address)),
-        host_address_(host_address) {}
+  JobPlanStepD2H(flex::CompositeAddress device_address,
+                 const PinnedBufferRing* host_ring)
+      : device_address_(std::move(device_address)), host_ring_(host_ring) {}
 
   void construct(LaunchContext& ctx, const SpyreStream& stream) const override;
 
   void write(std::ostream& os) const override;
 
  private:
+  /// Resolve the host source pointer for this launch. When backed by a ring the
+  /// slot is chosen from ctx.slot_index
+  void* resolveHostAddress(const LaunchContext& ctx) const {
+    return host_ring_->slotFor(ctx.slot_index).data();
+  }
+
   flex::CompositeAddress device_address_;
-  void* host_address_;
+  const PinnedBufferRing* host_ring_;  // Non-owning (JobPlan owns the ring)
 };
 
 /**
@@ -381,15 +428,6 @@ class JobPlanStepCompute final : public JobPlanStep {
  * deeptools::processComputeOnHostCommand which takes Hcm metadata and performs
  * program correction or other host-side operations.
  *
- * The output buffer is a pointer to pinned host memory, shared
- * with the subsequent JobPlanStepH2D that transfers it to device. construct()
- * builds a closure capturing the metadata, composite addresses, and
- * the buffer, and produces a RuntimeOperationHostCallback.
- *
- * The shared buffer is allocated once during PrepareKernel and reused across
- * launches. For tiled execution, the same buffer is reused across iterations —
- * FIFO ordering guarantees each iteration's H2D consumes the buffer before the
- * next iteration's HostCompute overwrites it.
  */
 class JobPlanStepHostCompute final : public JobPlanStep {
  public:
@@ -398,15 +436,21 @@ class JobPlanStepHostCompute final : public JobPlanStep {
    *
    * @param hcm Compiler-provided metadata from deeptools (contains vdci and
    *            senConstants describing how symbolic values must be interpreted)
-   * @param output_buffer Pinned host buffer (lifetime managed by JobPlan)
-   * @param input_buffer Pinned host buffer (lifetime managed by JobPlan)
+   * @param output_ring output pinned-buffer ring; the per-launch
+   *            slot is chosen from LaunchContext::slot_index. Non-owning — the
+   *            JobPlan owns the ring.
+   * @param input_ring input pinned-buffer ring; the per-launch
+   *            slot is chosen from LaunchContext::slot_index. Non-owning — the
+   *            JobPlan owns the ring.
    * @param ishape used for constructing input buffer
    */
-  JobPlanStepHostCompute(std::unique_ptr<Hcm> hcm, void* output_buffer,
-                         const void* input_buffer, std::vector<int64_t> ishape)
+  JobPlanStepHostCompute(std::unique_ptr<Hcm> hcm,
+                         const PinnedBufferRing* output_ring,
+                         const PinnedBufferRing* input_ring,
+                         std::vector<int64_t> ishape)
       : hcm_(std::move(hcm)),
-        output_buffer_(output_buffer),
-        input_buffer_(input_buffer),
+        output_ring_(output_ring),
+        input_ring_(input_ring),
         ishape_(ishape) {}
 
   void construct(LaunchContext& ctx, const SpyreStream& stream) const override;
@@ -415,8 +459,8 @@ class JobPlanStepHostCompute final : public JobPlanStep {
 
  private:
   std::unique_ptr<Hcm> hcm_;
-  void* output_buffer_;       // Non-owning pointer (JobPlan owns the buffer)
-  const void* input_buffer_;  // Non-owning pointer (JobPlan owns the buffer)
+  const PinnedBufferRing* output_ring_;  // Non-owning (JobPlan owns the ring)
+  const PinnedBufferRing* input_ring_;   // Non-owning (JobPlan owns the ring)
   std::vector<int64_t> ishape_;
 };
 
@@ -482,16 +526,18 @@ struct JobPlan {
   std::vector<std::vector<int64_t>> expected_input_shapes;
 
   /**
-   * @brief Pinned host buffers owned by this JobPlan
+   * @brief Pinned host buffer rings owned by this JobPlan, keyed by handle
    *
-   * Stores pinned memory buffers (e.g., for correction tensors) that must
-   * remain alive for the lifetime of the JobPlan. Steps reference these
-   * buffers via raw pointers. Buffers are automatically freed when JobPlan
-   * is destroyed.
+   * Each SpyreCode buffer handle (e.g. a correction-tensor handle shared
+   * between a ComputeOnHost and its DataTransfer) maps to one PinnedBufferRing.
+   * Steps hold a non-owning pointer to their ring plus resolve the per-launch
+   * slot from LaunchContext::slot_index inside construct(). The rings (and
+   * their buffers) are freed when the JobPlan is destroyed.
    *
+   * Ring depth K is the StreamSynchronizationSpec's lookahead window. Today all
+   * rings are built with K==1 (correct for the single-FIFO-stream path).
    */
-  // TODO(jni): not safe for multi streams. Make it per-stream. See #2520.
-  std::vector<HostBuffer> pinned_buffers;
+  std::unordered_map<std::string, PinnedBufferRing> pinned_buffers;
 
   /**
    * @brief Compiled programs
