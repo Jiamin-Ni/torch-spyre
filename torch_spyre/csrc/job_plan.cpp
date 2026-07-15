@@ -41,7 +41,7 @@ void JobPlanStepH2D::construct(LaunchContext&,
 void JobPlanStepH2D::write(std::ostream& os) const {
   os << "  H2D (Host-to-Device)\n";
   os << "    Host address: " << host_address_ << "\n";
-  os << "    Device address: " << device_address_ << "\n";
+  os << "    Device CompositeAddress: " << device_address_ << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
 }
@@ -97,7 +97,7 @@ void JobPlanStepD2H::construct(LaunchContext& ctx,
 void JobPlanStepD2H::write(std::ostream& os) const {
   os << "  D2H (Device-to-Host)\n";
   if (std::holds_alternative<flex::CompositeAddress>(device_address_)) {
-    os << "    Device address: "
+    os << "    Device CompositeAddress: "
        << std::get<flex::CompositeAddress>(device_address_) << "\n";
   } else {
     os << "    Device dmva: " << std::get<Dmva>(device_address_).value << "\n";
@@ -129,7 +129,7 @@ void JobPlanStepCompute::construct(LaunchContext& ctx,
 void JobPlanStepCompute::write(std::ostream& os) const {
   os << "  Device Compute\n";
   os << "    Name: " << (name_.empty() ? "(unnamed)" : name_) << "\n";
-  os << "    Program address: " << program_address_ << "\n";
+  os << "    Program CompositeAddress: " << program_address_ << "\n";
   os << "    Bind I/O addresses: " << (bind_io_addresses_ ? "yes" : "no")
      << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
