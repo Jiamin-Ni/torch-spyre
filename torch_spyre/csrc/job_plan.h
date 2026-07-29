@@ -371,9 +371,8 @@ class JobPlanStepD2H final : public JobPlanStep {
    * @param size Size of data to transfer
    */
   JobPlanStepD2H(flex::CompositeAddress device_address,
-                 const PinnedBufferRing* host_ring,
-                 size_t size)
-      : device_address_(std::move(device_address)), 
+                 const PinnedBufferRing* host_ring, size_t size)
+      : device_address_(std::move(device_address)),
         host_ring_(host_ring),
         size_(size) {}
 
