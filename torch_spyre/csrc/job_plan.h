@@ -180,7 +180,7 @@ class HostBuffer {
  *
  */
 struct PinnedBufferRing {
-  /// K interchangeable buffers. Steps resolve `slotFor(ctx.slot_index).data()`
+  /// K interchangeable buffers. Steps resolve `slotAt(ctx.slot_index).data()`
   /// at launch time so successive launches land on different buffers.
   std::vector<HostBuffer> slots;
 
@@ -191,12 +191,12 @@ struct PinnedBufferRing {
    * (LaunchContext::slot_index)
    * @return The HostBuffer for this launch: slots[launch_index % K]
    */
-  HostBuffer& slotFor(size_t launch_index) {
+  HostBuffer& slotAt(size_t launch_index) {
     TORCH_CHECK(!slots.empty(), "PinnedBufferRing has no slots");
     return slots[launch_index % slots.size()];
   }
 
-  const HostBuffer& slotFor(size_t launch_index) const {
+  const HostBuffer& slotAt(size_t launch_index) const {
     TORCH_CHECK(!slots.empty(), "PinnedBufferRing has no slots");
     return slots[launch_index % slots.size()];
   }
@@ -222,7 +222,7 @@ struct LaunchContext {
    * @brief Which pinned-buffer ring slot this launch uses
    *
    * Steps that reference a PinnedBufferRing resolve their host pointer as
-   * `ring.slotFor(slot_index).data()` inside construct(), so a given launch's
+   * `ring.slotAt(slot_index).data()` inside construct(), so a given launch's
    * HostCompute and its paired H2D land on the *same* slot while successive
    * launches rotate to different slots. Defaults to 0, which — combined with a
    * ring depth of K==1 — reproduces today's single-buffer, single-FIFO-stream
@@ -340,7 +340,7 @@ class JobPlanStepH2D final : public JobPlanStep {
   /// Resolve the host source pointer for this launch. When backed by a ring the
   /// slot is chosen from ctx.slot_index
   void* resolveHostAddress(const LaunchContext& ctx) const {
-    return host_ring_->slotFor(ctx.slot_index).data();
+    return host_ring_->slotAt(ctx.slot_index).data();
   }
 
   const PinnedBufferRing* host_ring_;  // Non-owning (JobPlan owns the ring)
@@ -394,7 +394,7 @@ class JobPlanStepD2H final : public JobPlanStep {
   /// Resolve the host source pointer for this launch. When backed by a ring the
   /// slot is chosen from ctx.slot_index
   void* resolveHostAddress(const LaunchContext& ctx) const {
-    return host_ring_->slotFor(ctx.slot_index).data();
+    return host_ring_->slotAt(ctx.slot_index).data();
   }
 
   std::variant<flex::CompositeAddress, Dmva> device_address_;
@@ -478,6 +478,8 @@ class JobPlanStepHostCompute final : public JobPlanStep {
         output_ring_(output_ring),
         input_ring_(input_ring),
         ishape_(ishape) {
+    TORCH_CHECK(output_ring_ != nullptr,
+                "JobPlanStepHostCompute requires a non-null output ring");
     pipeline_barrier_ = false;  // host callbacks are overlap-eligible
   }
 
@@ -563,7 +565,8 @@ struct JobPlan {
    * their buffers) are freed when the JobPlan is destroyed.
    *
    * Ring depth K is the StreamSynchronizationSpec's lookahead window. Today all
-   * rings are built with K==1 (correct for the single-FIFO-stream path).
+   * rings are built with K==1 (correct for the single-FIFO-stream path). Extend
+   * to K>1 for multi streams. See #2520.
    */
   std::unordered_map<std::string, PinnedBufferRing> pinned_buffers;
 

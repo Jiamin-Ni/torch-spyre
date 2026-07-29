@@ -164,10 +164,10 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
     stream.launchHostCallback(params);
   };
 
-  void* output_buffer = output_ring_->slotFor(ctx.slot_index).data();
+  void* output_buffer = output_ring_->slotAt(ctx.slot_index).data();
   // Case 1: input_ring_ is provided
   if (input_ring_ != nullptr) {
-    const void* input_buffer = input_ring_->slotFor(ctx.slot_index).data();
+    const void* input_buffer = input_ring_->slotAt(ctx.slot_index).data();
     launch_host_callback([this, output_buffer, input_buffer](void*) {
       deeptools::processComputeOnHostCommand(*hcm_, output_buffer,
                                              input_buffer);
@@ -203,7 +203,7 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
 
 void JobPlanStepHostCompute::write(std::ostream& os) const {
   os << "  Host Compute\n";
-  os << "    Output ring: " << (output_ring_ ? output_ring_->slots.size() : 0)
+  os << "    Output ring: " << output_ring_->slots.size()
      << " slot(s) (resolved at launch)\n";
   os << "    HCM metadata: " << (hcm_ ? "present" : "null") << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")

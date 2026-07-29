@@ -37,7 +37,7 @@ namespace spyre {
 /**
  * @brief Depth K of every pinned-buffer ring built during PrepareKernel
  *
- * K==1 gives one buffer per handle, reproducing the currnet single-buffer
+ * K==1 gives one buffer per handle, reproducing the current single-buffer
  * behavior exactly — correct while all work is submitted to a single FIFO
  * stream. Overlapping host compute with device compute under the
  * StreamSynchronizationSpec requires K>1 so successive launches rotate to
@@ -416,23 +416,26 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
               "ComputeOnHost command missing 'ohandle' property");
   std::string ohandle = cmd["ohandle"].get<std::string>();
 
-  // Allocate the output pinned-buffer ring for this handle
-  auto it = pinned_buffer_map_.find(ohandle);
-  TORCH_CHECK(it == pinned_buffer_map_.end(), "ohandle '", ohandle,
-              "' already exists in pinned buffer map");
+  // Allocate the output pinned-buffer ring for this handle.
   TORCH_CHECK(cmd.contains("size"),
               "ComputeOnHost command missing 'size' property");
   std::string size_str = cmd["size"].get<std::string>();
   size_t buffer_size = safe_stoull(size_str, "ComputeOnHost size");
 
+  PinnedBufferRing ring;
   try {
-    pinned_buffer_map_[ohandle] = makePinnedRing(buffer_size);
+    ring = makePinnedRing(buffer_size);
   }
   catch (const std::bad_alloc&) {
     TORCH_CHECK(false,
                 "Failed to allocate pinned buffer for host compute output '",
                 ohandle, "', size=", buffer_size, " bytes");
   }
+  auto [oit, inserted] =
+      pinned_buffer_map_.try_emplace(ohandle, std::move(ring));
+  TORCH_CHECK(inserted, "ohandle '", ohandle,
+              "' already exists in pinned buffer map");
+  PinnedBufferRing* out_buffer = &oit->second;
 
   // Parse ishape
   // TODO(jni): further discussion is required on "ishape". See #2522. For now,
@@ -457,7 +460,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
   std::string ihandle = cmd["ihandle"].get<std::string>();
   if (!ihandle.empty()) {
     // Get input buffer from pinned_buffer_map_
-    it = pinned_buffer_map_.find(ihandle);
+    auto it = pinned_buffer_map_.find(ihandle);
     TORCH_CHECK(it != pinned_buffer_map_.end(), "ihandle '", ihandle,
                 "' not found in pinned buffer map");
     TORCH_CHECK(!it->second.slots.empty(), "ihandle '", ihandle,
@@ -484,7 +487,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnHost(
 
   // Create and return JobPlanStepHostCompute.
   return std::make_unique<JobPlanStepHostCompute>(
-      std::move(hcm_data), &pinned_buffer_map_[ohandle], inp_buffer, ishape);
+      std::move(hcm_data), out_buffer, inp_buffer, ishape);
 }
 
 std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
@@ -556,18 +559,20 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       // a producer/consumer ring shared with a HostCompute, so a fixed pointer
       // (slot 0 of a depth-1 ring) is used regardless of kPinnedRingDepth. The
       // JobPlan owns the buffer via pinned_buffer_map_.
-      auto it = pinned_buffer_map_.find(host_handle_str);
-      TORCH_CHECK(it == pinned_buffer_map_.end(), "Host handle '",
-                  host_handle_str, "' already exists in pinned buffer map");
-
+      PinnedBufferRing ring;
       try {
-        pinned_buffer_map_[host_handle_str] = makePinnedRing(transfer_size);
+        ring = makePinnedRing(transfer_size);
       }
       catch (const std::bad_alloc&) {
         TORCH_CHECK(false,
                     "Failed to allocate pinned buffer for D2H transfer '",
                     host_handle_str, "', size=", transfer_size, " bytes");
       }
+      auto [it, inserted] =
+          pinned_buffer_map_.try_emplace(host_handle_str, std::move(ring));
+      TORCH_CHECK(inserted, "Host handle '", host_handle_str,
+                  "' already exists in pinned buffer map");
+      PinnedBufferRing* host_ring = &it->second;
 
       // If device_ptr is in segment 7, calculate CompositeAddress and store it
       // in JobPlanStepH2D. If device_ptr is in tensor segments, store
@@ -576,14 +581,13 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
         // Compute CompositeAddress with offset from device_addr
         flex::CompositeAddress comp_addr = compute_offset_address(
             job_allocation_.at(0), device_ptr, transfer_size);
-        return std::make_unique<JobPlanStepD2H>(
-            std::move(comp_addr), &pinned_buffer_map_[host_handle_str],
-            transfer_size);
+        return std::make_unique<JobPlanStepD2H>(std::move(comp_addr), host_ring,
+                                                transfer_size);
       } else {
         TORCH_CHECK(bind_io_addresses_ == true,
                     "D2H dev_ptr must be in program segment.")
-        return std::make_unique<JobPlanStepD2H>(
-            device_ptr, &pinned_buffer_map_[host_handle_str], transfer_size);
+        return std::make_unique<JobPlanStepD2H>(device_ptr, host_ring,
+                                                transfer_size);
       }
     }
 

@@ -142,11 +142,10 @@ class JobPlanBuilder {
   /// Whether to bind inputs and outputs addresses for compute
   bool bind_io_addresses_;
 
-  /// Pinned host buffer rings, keyed by SpyreCode buffer handle. Node-based so
-  /// that &pinned_buffer_map_[handle] stays valid when the map is moved into
-  /// the JobPlan; steps store that non-owning ring pointer. Rings are built
-  /// with a depth of 1 today (kPinnedRingDepth); multi-stream overlap raises
-  /// the depth.
+  /// Pinned host buffer rings, keyed by SpyreCode buffer handle. Moved into
+  /// the JobPlan in build(); steps store that non-owning ring pointer. Rings
+  /// are built with a depth of 1 today (kPinnedRingDepth); multi-stream overlap
+  /// raises the depth.
   std::unordered_map<std::string, PinnedBufferRing> pinned_buffer_map_;
 
   std::vector<std::string> inits_;
