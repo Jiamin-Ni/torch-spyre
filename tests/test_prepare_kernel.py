@@ -534,6 +534,7 @@ class TestPrepareKernel:
                 RuntimeError, match="D2H dev_ptr must be in program segment"
             ):
                 self._prepare_with_symbolic_args(spyrecode_dir, symbolic_args=True)
+
     def test_pipeline_barrier_dma_steps_default_true(self):
         """H2D and D2H steps must carry pipeline_barrier=True by default."""
         with tempfile.TemporaryDirectory() as tmpdir:
