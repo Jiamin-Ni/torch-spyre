@@ -26,6 +26,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "util/spyrecode.h"
@@ -355,14 +356,36 @@ class JobPlanStepH2D final : public JobPlanStep {
 class JobPlanStepD2H final : public JobPlanStep {
  public:
   /**
+   * @brief Device memory virtual address representation
+   *
+   */
+  struct Dmva {
+    uint64_t value;
+  };
+
+  /**
    * @brief Construct D2H step
    *
    * @param device_address Device memory address
    * @param host_ring Non-owning pointer to the ring (JobPlan owns the ring)
+   * @param size Size of data to transfer
    */
   JobPlanStepD2H(flex::CompositeAddress device_address,
-                 const PinnedBufferRing* host_ring)
-      : device_address_(std::move(device_address)), host_ring_(host_ring) {}
+                 const PinnedBufferRing* host_ring,
+                 size_t size)
+      : device_address_(std::move(device_address)), 
+        host_ring_(host_ring),
+        size_(size) {}
+
+  /**
+   * @brief Construct D2H step
+   *
+   * @param dmva Device memory virtual address
+   * @param host_ring Non-owning pointer to the ring (JobPlan owns the ring)
+   * @param size Size of data to transfer
+   */
+  JobPlanStepD2H(uint64_t dmva, const PinnedBufferRing* host_ring, size_t size)
+      : device_address_(Dmva{dmva}), host_ring_(host_ring), size_(size) {}
 
   void construct(LaunchContext& ctx, const SpyreStream& stream) const override;
 
@@ -375,8 +398,9 @@ class JobPlanStepD2H final : public JobPlanStep {
     return host_ring_->slotFor(ctx.slot_index).data();
   }
 
-  flex::CompositeAddress device_address_;
+  std::variant<flex::CompositeAddress, Dmva> device_address_;
   const PinnedBufferRing* host_ring_;  // Non-owning (JobPlan owns the ring)
+  size_t size_;
 };
 
 /**
