@@ -565,8 +565,10 @@ struct JobPlan {
    * their buffers) are freed when the JobPlan is destroyed.
    *
    * Ring depth K is the StreamSynchronizationSpec's lookahead window. Today all
-   * rings are built with K==1 (correct for the single-FIFO-stream path). Extend
-   * to K>1 for multi streams. See #2520.
+   * rings are built with K==1 (correct for the single-FIFO-stream path).
+   *
+   * TODO(jni): extend to K>1 and atomically advance LaunchContext::slot_index.
+   * See #2520.
    */
   std::unordered_map<std::string, PinnedBufferRing> pinned_buffers;
 
