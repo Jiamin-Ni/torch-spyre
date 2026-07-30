@@ -556,9 +556,8 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateDataTransfer(
       size_t transfer_size = safe_stoull(size_str, "DataTransfer D2H size");
 
       // Allocate the readback destination buffer. This is a plain D2H sink, not
-      // a producer/consumer ring shared with a HostCompute, so a fixed pointer
-      // (slot 0 of a depth-1 ring) is used regardless of kPinnedRingDepth. The
-      // JobPlan owns the buffer via pinned_buffer_map_.
+      // a producer/consumer ring shared with a HostCompute; today it is slot 0
+      // of a depth-1 ring. The JobPlan owns the buffer via pinned_buffer_map_.
       PinnedBufferRing ring;
       try {
         ring = makePinnedRing(transfer_size);
