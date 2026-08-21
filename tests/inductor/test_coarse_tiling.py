@@ -3493,9 +3493,7 @@ class TestSharedWeightUnitBmmLayout(unittest.TestCase):
         flattened.meta["val"] = torch.empty(
             (rows, inner), dtype=torch.float16, device="meta"
         )
-        mm = graph.call_function(
-            torch.ops.aten.mm.default, args=(flattened, weight)
-        )
+        mm = graph.call_function(torch.ops.aten.mm.default, args=(flattened, weight))
         mm.meta["val"] = torch.empty(
             (rows, columns), dtype=torch.float16, device="meta"
         )
@@ -3524,8 +3522,7 @@ class TestSharedWeightUnitBmmLayout(unittest.TestCase):
         bmms = [
             node
             for node in graph.nodes
-            if node.op == "call_function"
-            and node.target == torch.ops.aten.bmm.default
+            if node.op == "call_function" and node.target == torch.ops.aten.bmm.default
         ]
         self.assertEqual(len(bmms), 1)
         self.assertNotIn(
