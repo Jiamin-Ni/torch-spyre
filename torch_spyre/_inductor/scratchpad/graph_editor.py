@@ -133,6 +133,7 @@ class GraphEditor:
             old_users = list(
                 dict.fromkeys(
                     getattr(consumer, "origin_node", None)
+                    or _origin_in_graph(consumer.origins, self.fx_graph)
                     or next(iter(consumer.origins))
                     for consumer in buffer_users
                 )

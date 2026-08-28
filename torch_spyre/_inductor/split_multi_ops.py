@@ -713,7 +713,10 @@ def _get_op_name(op) -> str:
         return ""
 
     # Prefer the origin in the current lowering graph (subgraph-safe); fall back
-    # to an arbitrary origin when no graph context is available.
+    # to an arbitrary origin when no graph context is available. That fallback
+    # may yield a parent-graph node for a subgraph buffer, which is safe *here*
+    # because this function only extracts a name string and never inserts into
+    # or mutates a graph. Do not gate graph-mutating logic on the result.
     gl = V.graph
     origin_node = None
     if hasattr(gl, "graph"):

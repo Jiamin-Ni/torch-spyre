@@ -112,7 +112,8 @@ class TestInvokeSubgraphSplit(unittest.TestCase):
         self.assertGreaterEqual(
             len(seen_hops[0]),
             2,
-            f"expected repeated invoke_subgraph calls, got {seen_hops[0]}",
+            "expected repeated invoke_subgraph calls, got "
+            f"{[n.name for n in seen_hops[0]]}",
         )
 
 
