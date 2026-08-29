@@ -130,14 +130,19 @@ class GraphEditor:
         )
         old_users = list(buf_fx.users.keys())
         if private:
-            old_users = list(
-                dict.fromkeys(
-                    getattr(consumer, "origin_node", None)
-                    or _origin_in_graph(consumer.origins, self.fx_graph)
-                    or next(iter(consumer.origins))
-                    for consumer in buffer_users
+            anchors = []
+            for consumer in buffer_users:
+                anchor = getattr(consumer, "origin_node", None) or _origin_in_graph(
+                    consumer.origins, self.fx_graph
                 )
-            )
+                assert anchor is not None, (
+                    f"no origin of consumer {consumer.get_name()} lives in the "
+                    "current lowering graph, so a private clone cannot be "
+                    "rewired safely; origins="
+                    f"{[getattr(n, 'name', n) for n in consumer.origins]}"
+                )
+                anchors.append(anchor)
+            old_users = list(dict.fromkeys(anchors))
         self.fx_graph.inserting_after(buf_fx)
         new_fx_node = self.fx_graph.create_node(
             "call_function", self.clone_aten_op, (buf_fx,)
