@@ -256,14 +256,14 @@ def _unflatten_mm_to_bmm(
     # Replace all uses of mm and output view with the bmm
     node.replace_all_uses_with(bmm_node)
     output_view.replace_all_uses_with(bmm_node)
-    if not _has_rank_expanding_reshape_user(bmm_node):
-        _mark_static_unit_batch_bmm(bmm_node, lhs_input, expanded)
 
     # Clean up dead nodes
     graph.erase_node(output_view)
     graph.erase_node(node)
     if not lhs.users:
         graph.erase_node(lhs)
+    if not _has_rank_expanding_reshape_user(bmm_node):
+        _mark_static_unit_batch_bmm(bmm_node, lhs_input, expanded)
 
 
 def _is_batch_collapsing_reshape(node: torch.fx.Node) -> bool:
