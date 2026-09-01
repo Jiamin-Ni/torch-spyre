@@ -3759,9 +3759,13 @@ class TestSharedWeightUnitBmmLayout(unittest.TestCase):
             self._static_bmm_custom_meta((1, m, 2), (1, 2, n), (1, m, n)),
         )
 
-    def test_mm_to_bmm_does_not_mark_rank_expanding_output_view(self):
-        batch, rows, inner, heads, head_dim = 1, 64, 2048, 8, 128
-        columns = heads * head_dim
+    def _mm_to_bmm_marker_for_output_consumer(self, unpack_shape):
+        """Build view->mm->view(3D) plus a consumer, return the bmm custom meta.
+
+        ``unpack_shape`` is the size argument of an extra reshape user hung off
+        the restored 3D result, or None for an MLP-style rank-3 consumer.
+        """
+        batch, rows, inner, columns = 1, 64, 2048, 4096
         graph = fx.Graph()
         x = graph.placeholder("x")
         x.meta["val"] = torch.empty(
@@ -3788,16 +3792,28 @@ class TestSharedWeightUnitBmmLayout(unittest.TestCase):
         linear_output.meta["val"] = torch.empty(
             (batch, rows, columns), dtype=torch.float16, device="meta"
         )
-        heads_view = graph.call_function(
-            torch.ops.aten.reshape.default,
-            args=(linear_output, (batch, rows, heads, head_dim)),
-        )
-        heads_view.meta["val"] = torch.empty(
-            (batch, rows, heads, head_dim),
-            dtype=torch.float16,
-            device="meta",
-        )
-        graph.output(heads_view)
+        if unpack_shape is None:
+            # MLP-style consumer: stays rank 3, so the marker must survive.
+            consumer = graph.call_function(
+                torch.ops.aten.mul.Tensor, args=(linear_output, 0.22)
+            )
+            consumer.meta["val"] = torch.empty(
+                (batch, rows, columns), dtype=torch.float16, device="meta"
+            )
+        else:
+            # meta["val"] carries the resolved shape even when the size
+            # argument leaves the head count inferred as -1.
+            heads = columns // unpack_shape[-1]
+            consumer = graph.call_function(
+                torch.ops.aten.reshape.default,
+                args=(linear_output, unpack_shape),
+            )
+            consumer.meta["val"] = torch.empty(
+                (batch, rows, heads, unpack_shape[-1]),
+                dtype=torch.float16,
+                device="meta",
+            )
+        graph.output(consumer)
 
         graph_module = fx.GraphModule({}, graph)
         mm_to_bmm_pass.apply(graph_module)
@@ -3809,9 +3825,23 @@ class TestSharedWeightUnitBmmLayout(unittest.TestCase):
             if node.op == "call_function" and node.target == torch.ops.aten.bmm.default
         ]
         self.assertEqual(len(bmms), 1)
+        return bmms[0].meta.get("custom") or {}
+
+    def test_mm_to_bmm_marks_rank_preserving_output_consumer(self):
+        # Positive counterpart to the rank-expanding test: an MLP-style
+        # projection whose consumer keeps rank 3 must still be marked, so a
+        # gate that stopped marking entirely would fail here.
+        self.assertIn(
+            SHARED_WEIGHT_UNIT_BMM_CUSTOM_META_KEY,
+            self._mm_to_bmm_marker_for_output_consumer(None),
+        )
+
+    def test_mm_to_bmm_does_not_mark_rank_expanding_output_view(self):
+        # A rank-expanding output view means the rank-3 shape was a transient
+        # flattening, so layout decisions premised on it are wrong.
         self.assertNotIn(
             SHARED_WEIGHT_UNIT_BMM_CUSTOM_META_KEY,
-            bmms[0].meta.get("custom") or {},
+            self._mm_to_bmm_marker_for_output_consumer((1, 64, -1, 128)),
         )
 
     def test_mark_direct_unit_bmm_pass_does_not_mark_reshape_inputs(self):

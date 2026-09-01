@@ -110,11 +110,19 @@ def _is_direct_unit_bmm_operand(node: torch.fx.Node) -> bool:
 
 
 def _has_rank_expanding_reshape_user(node: torch.fx.Node) -> bool:
+    """Check whether any reshape user views the result back up to rank > 3.
+
+    The rank is read from the user's ``meta["val"]`` rather than its size
+    argument: the size argument may be a symbolic FX Node under dynamic
+    shapes, and even when it is a list it can carry a ``-1`` placeholder
+    (Granite's heads unpack is ``[1, 64, -1, 128]``). ``meta["val"]`` always
+    carries the resolved shape.
+    """
     for user in node.users:
         if user.op != "call_function" or user.target not in _RESHAPE_OPS:
             continue
-        output_shape = user.args[1]
-        if isinstance(output_shape, (list, tuple)) and len(output_shape) > 3:
+        user_shape = _node_shape(user)
+        if user_shape is not None and len(user_shape) > 3:
             return True
     return False
 
