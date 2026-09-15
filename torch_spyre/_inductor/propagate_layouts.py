@@ -96,6 +96,7 @@ from .pass_utils import (
     is_stick_expr_offset_free,
     is_topk,
     iter_var_id,
+    origin_in_graph,
     rescale_stl_for_dtype,
 )
 from .optimize_restickify import AllSameNode, AnyInNode, FixedInOutNode
@@ -112,6 +113,45 @@ logger = get_inductor_logger("propagate_layouts")
 prims = torch.ops.prims
 aten = torch.ops.aten
 spyreop = torch.ops.spyre
+
+
+def _origin_aten_op(data):
+    """The aten target of ``data``'s origin in the graph currently being lowered.
+
+    A buffer lowered inside an ``invoke_subgraph`` HOP (a
+    ``nested_compile_region`` block reused across call sites) inherits origins
+    spanning BOTH the parent graph (the ``invoke_subgraph`` call and its
+    ``get_attr``) and the subgraph's own compute nodes. ``IRNode.current_origins``
+    unions as ``old | origins`` into an insertion-ordered ``OrderedSet``, so the
+    PARENT nodes come first and a bare ``next(iter(data.origins))`` selects the
+    ``invoke_subgraph`` HOP -- whose ``.target`` matches no aten op, silently
+    routing the buffer to the generic layout path instead of its op-specific
+    handler. For a ``clone`` that means losing ``_clone_layout``'s row-major
+    (identity-permutation) STL, so the buffer's device axes come out permuted
+    (e.g. a GQA expand committing ``[4, 512, 1, 2, 8, 64]`` instead of
+    ``[8, 4, 512, 2, 1, 64]``); a downstream matmul then splits its contraction
+    coordinate, gains a synthetic dim, and the backend aborts with
+    ``out_reuse_dim.size() == 1``.
+
+    Selects the graph-local origin via ``pass_utils.origin_in_graph``, whose
+    docstring documents this hazard and the ``None``-policy rules. Layout
+    dispatch is graph-affecting, so this deliberately does NOT fall back to an
+    arbitrary origin: a foreign parent-graph target matches no aten op and would
+    silently route to the generic path -- the exact failure described above.
+    ``None`` means "no usable aten target" and each caller decides what that
+    warrants; do not reintroduce a fallback here.
+
+    Returns ``None`` when ``data`` has no origins, when there is no graph
+    context, or when no origin belongs to the graph being lowered.
+    """
+    origins = getattr(data, "origins", None)
+    if not origins:
+        return None
+    graph = getattr(V.graph, "graph", None)
+    if graph is None:
+        return None
+    node = origin_in_graph(origins, graph)
+    return node.target if node is not None else None
 
 
 class PropArg(NamedTuple):
@@ -553,7 +593,7 @@ def _single_arg_op_layout(
 
     # Single-arg pointwise
     assert isinstance(data, Pointwise)
-    aten_op = next(iter(data.origins)).target if data.origins else None
+    aten_op = _origin_aten_op(data)
     match aten_op:
         case (
             prims.convert_element_type.default
@@ -1942,7 +1982,7 @@ def compute_layouts(
     if is_keep_by_index(op):
         return _keep_by_index_layouts(op, output, output_dep, args)
 
-    aten_op = next(iter(data.origins)).target if data.origins else None
+    aten_op = _origin_aten_op(data)
 
     if aten_op == spyreop.layernormnorm.default:
         # layernormnorm is pointwise but special: it has multiple args, input and
@@ -2537,15 +2577,167 @@ def _eager_view_input_layout(
     )
 
 
+def _operand_stl(operand, parent) -> SpyreTensorLayout | None:
+    """Read the device layout the parent graph settled on for ``operand``.
+
+    Mirrors ``_get_prop_args``: a buffer still mid-propagation exposes candidate
+    layouts in ``.layouts``, while one past ``finalize_layouts`` carries the
+    single decided layout in ``FixedTiledLayout.device_layout``.
+    """
+    # layouts = getattr(operand, "layouts", None)
+    # if layouts:
+    #     return layouts[0]
+    # try:
+    #     layout = operand.get_layout()
+    # except Exception:
+    #     return None
+    # if isinstance(layout, FixedTiledLayout):
+    #     return layout.device_layout
+    # return None
+
+    name = operand.maybe_get_name()
+    if not name:
+        return None
+
+    buf = parent.try_get_buffer(name)
+    layout = buf.maybe_get_layout() if buf is not None else None
+    if isinstance(layout, FixedTiledLayout):
+        return layout.device_layout
+    return None
+
+
+def _subgraph_input_stls(graph: GraphLowering) -> list | None:
+    """Resolve a subgraph's per-input device layouts, in placeholder order.
+
+    ``V.real_inputs`` is bound once for the top-level graph and is NOT re-bound
+    when ``codegen_subgraph_common`` recurses into an ``invoke_subgraph`` body
+    (it swaps only ``V.graph``, via ``set_graph_handler``). So while lowering a
+    subgraph, ``V.get_real_inputs()`` still yields the PARENT's inputs, whose
+    order and length differ from the subgraph's placeholders: Dynamo lifts the
+    region's captured parameters in its own order, and the region typically takes
+    fewer inputs than the parent has. Zipping the two positionally seeds each
+    subgraph input with an unrelated tensor's device layout -- e.g. a
+    ``[4096, 2048]`` projection weight receiving an attention mask's 4-D layout,
+    which later aborts in ``_matmul_layouts`` as an unstickable matmul operand.
+
+    The ``InvokeSubgraph`` IR node records the true correspondence: its
+    ``inputs`` are the parent buffers passed as operands, in subgraph-placeholder
+    order (``InvokeSubgraph.create`` constrains each operand to the matching
+    subgraph input). For an operand that is a parent graph input, read the STL
+    off its real tensor; for one computed in the parent (e.g. layer N's hidden
+    state feeding layer N+1), read the layout the parent already propagated.
+
+    A shared region body is codegened only once (see
+    ``already_codegened_subgraphs``) but called from several sites with different
+    operands, so the layouts must agree across call sites. Inductor codegens the
+    body from the FIRST call site, so that site's operand layouts are the ones
+    the emitted body is specialized to and we seed from it. A later site whose
+    operands carry a different layout would need a restickify at the call
+    boundary, which no pass inserts today (``insert_restickify`` does not model
+    ``InvokeSubgraph``), so rather than miscompile silently we raise.
+
+    Returns a list of ``SpyreTensorLayout | None`` (None = leave that input
+    alone, matching the old ``stl is None`` skip), or None if no mapping could be
+    established, in which case the caller falls back to ``V.real_inputs``.
+    """
+    from torch._inductor.ir import InvokeSubgraph
+
+    parent = getattr(graph, "parent", None)
+    if parent is None:
+        return None
+
+    parent_real = V.get_real_inputs()
+    by_name = (
+        dict(zip(parent.graph_input_names, parent_real))
+        if len(parent.graph_input_names) == len(parent_real)
+        else {}
+    )
+
+    resolved: list | None = None
+    for op in parent.operations:
+        if not isinstance(op, InvokeSubgraph):
+            continue
+        sub = op.subgraph
+        if sub is None or sub.graph is not graph:
+            continue
+        operands = op.inputs or []
+        if len(operands) != len(graph.graph_input_names):
+            return None
+        stls: list = []
+        #logger.warning(" loop subgraphs")
+        for operand in operands:
+            oname = operand.get_name() if hasattr(operand, "get_name") else None
+            real = by_name.get(oname)
+            if isinstance(real, torch.Tensor):
+                stls.append(real.device_tensor_layout())
+                #logger.warning("  oname %s, real.device_tensor_layout %s", oname, str(real.device_tensor_layout()))
+            else:
+                stls.append(_operand_stl(operand, parent))
+                if _operand_stl(operand, parent) is None:
+                    raise Unsupported(f"_operand_stl(operand, parent) is None")
+        if resolved is None:
+            resolved = stls
+            continue
+        # Merge across call sites. A None entry means "no layout known at this
+        # site yet" (an operand the parent has not propagated), not "a different
+        # layout" -- so a known layout from any site fills it in. Two sites that
+        # both know, and disagree, genuinely cannot share one body.
+        mismatched = []
+        for i, (a, b) in enumerate(zip(resolved, stls)):
+            if b is not None and a != b:
+                mismatched.append((i, a.device_size, b.device_size))
+        if mismatched:
+            raise Unsupported(
+                f"invoke_subgraph {graph.name!r} is called with operands whose "
+                f"device layouts differ between call sites at input index(es) "
+                f"{mismatched}; the shared body is codegened once and cannot "
+                f"serve both, and restickify at the call boundary is not yet "
+                f"supported"
+            )
+    return resolved
+
+
 def propagate_spyre_tensor_layouts(
     graph: GraphLowering,
 ) -> None:
+    logger.debug("propagate_spyre_tensor_layouts starts")
     operations = graph.operations
     # Convert InputBuffers from FixedLayout to SpyreTensorLayouts
     if len(graph.graph_input_names) > 0:
-        for name, real_input in zip(graph.graph_input_names, V.get_real_inputs()):
+        sub_stls = _subgraph_input_stls(graph)
+        if sub_stls is not None:
+            logger.debug("this is subgraph")
+            # A subgraph: seed from the invoke_subgraph operands (see above), not
+            # from the parent's V.real_inputs, which do not correspond.
+            real_inputs: list = [None] * len(sub_stls)
+        else:
+            logger.debug("this is full graph")
+            real_inputs = list(V.get_real_inputs())
+            # A positional zip is only meaningful when both lists describe the
+            # same inputs. Silent truncation seeds inputs with foreign device
+            # layouts and surfaces much later as a bogus layout error.
+            if len(graph.graph_input_names) != len(real_inputs):
+                raise Unsupported(
+                    f"graph {graph.name!r} has {len(graph.graph_input_names)} "
+                    f"inputs but {len(real_inputs)} real inputs are available; "
+                    f"cannot map device layouts onto graph inputs positionally"
+                )
+        for idx, (name, real_input) in enumerate(
+            zip(graph.graph_input_names, real_inputs)
+        ):
+            logger.debug("input %s, name: %s", str(idx), name)
+            if sub_stls is not None:
+                stl = sub_stls[idx]
+                logger.debug("stl: %s", str(stl))
+                if stl is None:
+                    continue
+                tb = graph.graph_inputs[name]
+                if isinstance(tb, TensorBox):
+                    tb.layouts = [stl]
+                continue
             if isinstance(real_input, torch.Tensor):
                 stl = real_input.device_tensor_layout()
+                logger.debug("real_input.device_tensor_layout(): %s", str(stl))
                 if stl is None:
                     # A CPU tensor lifted as a graph input, or a host tensor
                     # feeding a FallbackKernel has no Spyre layout;
