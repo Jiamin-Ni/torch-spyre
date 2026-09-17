@@ -23,6 +23,9 @@ tests exercise:
   origins in ``split_multi_ops`` (issue #3883).
 - ``TestInvokeSubgraphAttention`` -- a realistic Granite-8B prefill attention
   body (SDPA + o_proj) inside a region: compiles, and matches CPU numerically.
+- ``TestInvokeSubgraphEmbeddingFedOperand`` -- the same attention body, but with
+  the layer-0 hidden state produced by an in-graph embedding, so the call sites
+  disagree about the operand's device layout.
 
 Both assert on the FX graph Inductor actually receives: if Dynamo inlined the
 regions into the parent there is no subgraph at all, and a test that only
@@ -304,6 +307,116 @@ class TestInvokeSubgraphAttention(_RegionTestCase):
             None,
             outer_cpu,
             *[t.float() for t in cpu_inputs],
+            atol=0.2,
+            rtol=0.2,
+            target=out.float(),
+        )
+
+
+_VOCAB = 128  # small: the embedding table's own size is irrelevant here
+
+
+class TestInvokeSubgraphEmbeddingFedOperand(_RegionTestCase):
+    """An embedding-fed region stack: every call site must get one operand layout.
+
+    Same body as ``TestInvokeSubgraphAttention`` (SDPA -> o_proj), but the hidden
+    state entering layer 0 comes from an ``nn.Embedding`` inside the graph instead
+    of arriving as a graph input. That single change is what reproduces the
+    Granite 3.3 2B whole-forward failure, and it is why
+    ``hf_granite._run_backbone_forward`` carried an explicit
+    ``h.transpose(1, 2).contiguous().transpose(1, 2).contiguous()`` round trip
+    after the embedding -- a logical no-op whose only effect was to re-materialize
+    the hidden state in the layout the later layers pass. The compiler now does
+    that itself, so that workaround can go.
+
+    Cost parity, not yet an optimization: the compiler inserts the SAME single
+    copy the eager path open-coded -- one restickify of the embedding output, with
+    every later call site already compliant. ``_subgraph_boundary_stl`` documents
+    why one fixed boundary layout is the conservative first choice and how it
+    could be sharpened later.
+
+    Covers the OPERAND side of the boundary only. Subgraph RESULTS are declared to
+    carry the generic layout by the ``MultiOutput`` branch of
+    ``propagate_spyre_tensor_layouts``, and nothing verifies the body produces it;
+    Granite 3.3 2B happens to comply, so this test passes without exercising that
+    half. A body whose last op committed a different orientation would disagree
+    silently -- see the comment on that branch.
+
+    The asymmetry: layer 0's operand is the embedding output, committed as
+    ``device_size=[1, 32, 512, 64]`` / ``stride_map=[-1, 64, 2048, 1]``; layers
+    1..N-1 take the previous region's ``MultiOutput``, stamped with the generic
+    layout ``[512, 32, 1, 64]`` / ``[2048, 64, -1, 1]``. The ``stride_map``
+    contents agree and both put the same variable on the stick -- so
+    ``stick_compatible`` calls them compatible and no ordinary restickify is
+    planned -- but the 512 extent sits on a different device AXIS. Codegen derives
+    device strides from ``device_size`` positionally
+    (``_calculate_device_stride``), so the body, codegened once from the first
+    call site, would address every later site's operand wrongly. Hence
+    ``require_exact_layout`` on the boundary edge in propagate_layouts.
+
+    The body must MIX across the axis whose placement differs, or this test cannot
+    see the bug: a pointwise body reads every element exactly once and writes each
+    result back through the same addressing, so the permutation cancels and the
+    output is bit-identical no matter which layout arrives. SDPA + o_proj contract
+    over the sequence and hidden axes, so wrong addressing changes which values
+    are combined -- which is exactly why the 40-layer model emitted wrong tokens
+    (' Par' -> 'pec') rather than merely failing to compile.
+    """
+
+    def test_embedding_fed_attention_region_matches_cpu(self):
+        torch.manual_seed(0)
+        embed = nn.Embedding(_VOCAB, _HIDDEN).eval()
+        blocks = [_AttentionTail().eval() for _ in range(_NUM_LAYERS)]
+
+        def outer(ids, q, key_cache, value_cache, mask):
+            # Mirrors hf_granite._run_backbone_forward's prologue MINUS the
+            # transpose/contiguous round trip it used to need.
+            h = embed(ids)
+            for block in blocks:
+                h = _shared_attention_tail(block, h, q, key_cache, value_cache, mask)
+            return h
+
+        embed.to(device=DEVICE_NAME, dtype=torch.float16)
+        for block in blocks:
+            block.to(device=DEVICE_NAME, dtype=torch.float16)
+
+        seen_hops = []
+        compiled = self._compile_counting_hops(outer, seen_hops)
+
+        # Reuse the attention test's tensors, dropping its hidden_states (the
+        # embedding produces the hidden state here) and adding token ids.
+        _, q, key_cache, value_cache, mask = TestInvokeSubgraphAttention._inputs()
+        ids = torch.randint(0, _VOCAB, (_BATCH, _SEQLEN))
+        cpu_inputs = (ids, q, key_cache, value_cache, mask)
+        spyre_inputs = [t.to(DEVICE_NAME) for t in cpu_inputs]
+
+        # .cpu() forces the launch, so a runtime (not just compile) failure surfaces.
+        out = compiled(*spyre_inputs).cpu()
+
+        self.assertEqual(tuple(out.shape), (_BATCH, _SEQLEN, _HIDDEN))
+        self._assert_regions_not_inlined(seen_hops, expected=_NUM_LAYERS)
+        self.assertTrue(
+            torch.isfinite(out.to(torch.float32)).all(), "output has non-finite values"
+        )
+
+        # The real gate: a body fed its operand through the wrong axis-order
+        # addressing still produces the right shape and finite values, so only
+        # value equality separates a correct boundary copy from a missing one.
+        embed.to(device="cpu", dtype=torch.float32)
+        for block in blocks:
+            block.to(device="cpu", dtype=torch.float32)
+
+        def outer_cpu(ids_cpu, q_, k_, v_, mask_):
+            h = embed(ids_cpu)
+            for block in blocks:
+                h = block(h, q_, k_, v_, mask_)
+            return h
+
+        compare_with_pytorch(
+            None,
+            outer_cpu,
+            ids,
+            *[t.float() for t in cpu_inputs[1:]],
             atol=0.2,
             rtol=0.2,
             target=out.float(),

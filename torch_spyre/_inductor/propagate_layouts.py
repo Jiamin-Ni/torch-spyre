@@ -29,6 +29,7 @@ from torch._inductor.ir import (
     FallbackKernel,
     FixedLayout,
     InputBuffer,
+    InvokeSubgraph,
     Layout,
     MutableBox,
     MutationLayoutSHOULDREMOVE,
@@ -40,7 +41,7 @@ from torch._inductor.ir import (
     StorageBox,
     TensorBox,
 )
-from torch._inductor.dependencies import MemoryDep
+from torch._inductor.dependencies import MemoryDep, index_vars_squeeze
 from torch._inductor.graph import GraphLowering
 from torch._inductor.scheduler import SchedulerNode
 from torch._inductor.virtualized import V
@@ -2577,6 +2578,97 @@ def _eager_view_input_layout(
     )
 
 
+def _subgraph_boundary_stl(buf) -> SpyreTensorLayout:
+    """The device layout every ``invoke_subgraph`` operand must arrive in.
+
+    A subgraph body is codegened ONCE -- from the first call site, see
+    ``already_codegened_subgraphs`` in ``codegen_subgraph_common`` -- and then
+    invoked from every site. Its generated addressing is fixed to the operand
+    layouts it was compiled against, and codegen derives device strides from
+    ``device_size`` positionally (``_calculate_device_stride`` in
+    codegen/superdsc.py), so a site whose operand places the same logical extents
+    on different device axes feeds the body addresses it was not built for. All
+    sites must therefore present each operand in one shared layout: this one.
+
+    The value is the default row-major, last-dim-as-stick STL -- the same
+    ``generic_layout`` already stamped on every subgraph RESULT (the MultiOutput
+    branch). That choice makes a stacked block canonical for free: layer N's
+    output feeding layer N+1 is a MultiOutput and already complies, so only
+    operands produced elsewhere in the parent (Granite's embedding feeding layer
+    0) need a copy. This is first attempt, and there is room to do better.
+
+    Scope: this governs the operands going IN. The results coming OUT are handled
+    by the ``MultiOutput`` branch of the main loop, which declares the same
+    generic layout. This is a declaration, not a derivation, and the subgraph is
+    never consulted. The parent must commit before the subgraph exists as a scheduled
+    graph: the parent's whole pipeline runs at its own _update_scheduler, while the
+    subgraph's does not run until codegen_subgraph_common recurses into it during
+    parent codegen. Granite 3.3 happens to comply, matching what is declared here,
+    which is why the operand-side fix was sufficient there.
+    """
+    layout: FixedLayout = buf.get_layout()
+    return SpyreTensorLayout([concretize_expr(s) for s in layout.size], layout.dtype)
+
+
+def _subgraph_operand_args(op) -> list[PropArg]:
+    """Build ``PropArg``s for the ``invoke_subgraph`` operands needing a layout edge.
+
+    ``InvokeSubgraph`` is an ``ExternKernel``, so ``get_read_writes()`` reports its
+    operands as ``StarDep`` ("reads the whole buffer, pattern unknown") with
+    ``index_exprs`` empty. ``_get_prop_args`` drops those, and ``EdgeCostMap`` needs
+    a ``MemoryDep.index`` to key the restickify plan on, so synthesize one dep per
+    operand describing what the HOP does: a full, row-major, offset-free read in
+    the operand's own logical order. Same technique as the ``target_co_dep``
+    synthesis in the mutation path, and simpler here -- no broadcast, no offset,
+    no sub-stick access to model.
+
+    Only operands the compiler OWNS get an edge:
+
+    - ``MultiOutput`` (a prior subgraph's or fallback's result) already carries
+      ``generic_layout``, so it complies by construction.
+    - A graph input's STL is the caller's fact, not a compiler choice (the
+      optimizer commits its single candidate verbatim), and restickifying one
+      raises buffer-ownership questions at the graph boundary. Deliberately out of
+      scope; ``_subgraph_input_stls`` still raises if such an operand disagrees.
+    - An intermediate ``ComputedBuffer`` is graph-internal and freely
+      restickifiable -- these are the edges returned here.
+    """
+    args: list[PropArg] = []
+    for operand in op.inputs or []:
+        name = operand.maybe_get_name() if hasattr(operand, "maybe_get_name") else None
+        if not name:
+            continue
+        buf = V.graph.try_get_buffer(name)
+        if not isinstance(buf, ComputedBuffer):
+            continue
+        layout = buf.maybe_get_layout()
+        if not isinstance(layout, FixedLayout) or layout.device.type != DEVICE_NAME:
+            continue
+        layouts = getattr(buf, "layouts", None)
+        if not layouts:
+            continue
+        size = [concretize_expr(s) for s in layout.size]
+        # Build the index with the same squeeze/prefix machinery
+        # extract_read_writes uses, so the synthesized dep is shaped like a real
+        # one: size-1 dims collapse to sympy.S.Zero instead of getting a live
+        # symbol, which is what device_coordinates expects.
+        (ivars,), _ = index_vars_squeeze(size, prefix="d")
+        index = sympy.Integer(0)
+        for d, var in enumerate(ivars):
+            if var == sympy.S.Zero:
+                continue
+            index += var * int(math.prod(size[d + 1 :]))
+        live = [(d, v) for d, v in enumerate(ivars) if v != sympy.S.Zero]
+        dep = MemoryDep(
+            name=name,
+            index=index,
+            var_names=tuple(v for _, v in live),
+            size=tuple(sympy.Integer(size[d]) for d, _ in live),
+        )
+        args.append(PropArg(dep, layout, list(layouts)))
+    return args
+
+
 def _operand_stl(operand, parent) -> SpyreTensorLayout | None:
     """Read the device layout the parent graph settled on for ``operand``.
 
@@ -2664,17 +2756,17 @@ def _subgraph_input_stls(graph: GraphLowering) -> list | None:
         if len(operands) != len(graph.graph_input_names):
             return None
         stls: list = []
-        #logger.warning(" loop subgraphs")
+        # logger.warning(" loop subgraphs")
         for operand in operands:
             oname = operand.get_name() if hasattr(operand, "get_name") else None
             real = by_name.get(oname)
             if isinstance(real, torch.Tensor):
                 stls.append(real.device_tensor_layout())
-                #logger.warning("  oname %s, real.device_tensor_layout %s", oname, str(real.device_tensor_layout()))
+                # logger.warning("  oname %s, real.device_tensor_layout %s", oname, str(real.device_tensor_layout()))
             else:
                 stls.append(_operand_stl(operand, parent))
                 if _operand_stl(operand, parent) is None:
-                    raise Unsupported(f"_operand_stl(operand, parent) is None")
+                    raise Unsupported("_operand_stl(operand, parent) is None")
         if resolved is None:
             resolved = stls
             continue
@@ -3101,6 +3193,41 @@ def propagate_spyre_tensor_layouts(
         elif isinstance(op, AllGatherAsyncFallback):
             op.layouts = [generic_layout(op)]
             op.restick_cost_fn = AnyInNode.from_args()
+        elif isinstance(op, InvokeSubgraph):
+            # The body is codegened once but invoked from N sites, so every
+            # operand must arrive in one shared layout (_subgraph_boundary_stl).
+            # Declare that as a hard per-edge requirement and let the ordinary
+            # machinery carry it out: the beam prices the copy into its objective,
+            # finalize_layouts plans it via required_input_stls, and
+            # insert_restickify materializes it.
+            #
+            # require_exact_layout is essential here. Stick compatibility alone
+            # accepts two layouts that agree on the stick variable but place the
+            # remaining coordinates on different device axes -- exactly the
+            # Granite embedding case ([1, 32, 512, 64] vs [512, 32, 1, 64]) --
+            # and codegen's positional stride derivation makes those NOT
+            # interchangeable. Without the flag no copy would be planned.
+            #
+            # The requirement is a per-edge COST, not a veto: a producer able to
+            # commit to the boundary layout pays 0 and no copy is planned. One
+            # fixed boundary layout is a deliberately conservative first choice --
+            # see _subgraph_boundary_stl for how it could be sharpened.
+            args = _subgraph_operand_args(op)
+            if args:
+                req_stls = [
+                    _subgraph_boundary_stl(V.graph.get_buffer(a.dep.name)) for a in args
+                ]
+                # InvokeSubgraph has MultiOutputLayout and carries no tensor layout
+                # of its own (its results' layouts live on the trailing
+                # MultiOutputs). FixedInOutNode uses out_stl only to answer
+                # required_input_stls(committed), and the requirement here is
+                # per-operand and independent of any output, so the first
+                # operand's boundary STL serves as an inert placeholder.
+                out_stl = req_stls[0]
+                op.layouts = [out_stl]
+                op.restick_cost_fn = FixedInOutNode.from_args(
+                    args, out_stl, req_stls, op, require_exact_layout=True
+                )
         elif isinstance(op, ExternKernel):
             logger.warning(f"unhandled node type {type(op)}")
         else:
