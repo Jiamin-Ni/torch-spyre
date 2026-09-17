@@ -131,17 +131,20 @@ void JobPlanStepCompute::construct(LaunchContext& ctx,
   auto* params = flex::createComputeParams(
       &program_address_, std::move(tensor_allocs), name_, bootstrap_offset_,
       /*tensor_byte_offsets=*/{}, dynamic_address);
+  // Use a scope-exit guard so params is freed even if launchCompute throws.
+  struct Guard {
+    flex::ComputeParams* p;
+    ~Guard() {
+      flex::destroyComputeParams(p);
+    }
+  } guard{params};
   params->pipeline_barrier = pipeline_barrier_;
   if (ctx.dynamic_alloc) {
     // Keeps the allocation alive until flex runs the completion callback for
-    // this op. flex destroys the RuntimeOperation at submit time, but
-    // makeCompletionCallback() copies params->callback into the completion
-    // closure, which lives until the hardware op completes — so the capture,
-    // not the op, is what holds the region.
+    // this op.
     params->callback = [alloc = ctx.dynamic_alloc](void*) {};
   }
   stream.launchCompute(params);
-  flex::destroyComputeParams(params);
 }
 
 void JobPlanStepCompute::write(std::ostream& os) const {

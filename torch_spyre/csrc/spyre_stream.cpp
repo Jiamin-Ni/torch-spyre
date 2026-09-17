@@ -307,9 +307,8 @@ void SpyreStream::launch(const JobPlan& plan,
   // device is done with it — each Compute step keeps a refcount through its
   // flex completion callback, so the last one to finish frees it.
   //
-  // MemoryType::ProgramDynamic puts it in the same region as the static
-  // allocation; flex distinguishes the two by giving each its own xlat window
-  // (segment 6 for dynamic, 7 for static).
+  // ProgramDynamic selects flex's dedicated segment-6 region; ProgramStatic
+  // uses the separate segment-7 region.
   if (plan.dynamic_size > 0) {
     auto& allocator = SpyreAllocator::instance();
     flex::AllocationDirective directive(flex::PlacementPolicy::Bind, {0},

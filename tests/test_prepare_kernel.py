@@ -750,9 +750,9 @@ class TestPrepareKernel:
     def test_stoull_allocate_negative_size(self):
         """Test that negative static_size in Allocate command is rejected.
 
-        dynamic_size is left valid so the negative value actually reaches
-        safe_stoull -- a missing dynamic_size would trip the required-property
-        TORCH_CHECK first and this would stop testing safe_stoull at all.
+        dynamic_size is left valid so the failure is attributable to the
+        static_size parse alone. Both sizes are validated before either is
+        used
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             job_exec_plan = [

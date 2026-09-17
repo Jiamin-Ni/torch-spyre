@@ -258,12 +258,21 @@ void JobPlanBuilder::executeAllocate(const nlohmann::json& cmd) {
   const auto& allocate_props =
       cmd.contains("properties") ? cmd["properties"] : nlohmann::json();
 
+  // Validate and parse both sizes before allocating anything, so a malformed
+  // dynamic_size cannot throw with the static allocation already made.
   TORCH_CHECK(allocate_props.contains("static_size"),
               "Allocate command missing 'static_size' property");
 
   std::string static_size_str =
       allocate_props["static_size"].get<std::string>();
   size_t static_size = safe_stoull(static_size_str, "Allocate static size");
+
+  TORCH_CHECK(allocate_props.contains("dynamic_size"),
+              "Allocate command missing 'dynamic_size' property");
+
+  std::string dynamic_size_str =
+      allocate_props["dynamic_size"].get<std::string>();
+  size_t dynamic_size = safe_stoull(dynamic_size_str, "Allocate dynamic size");
 
   auto& allocator = SpyreAllocator::instance();
   flex::AllocationDirective directive(flex::PlacementPolicy::Bind, {0},
@@ -275,12 +284,7 @@ void JobPlanBuilder::executeAllocate(const nlohmann::json& cmd) {
       std::move(static_cast<SharedOwnerCtx*>(allocated_ptr.get_context())
                     ->composite_addr));
 
-  TORCH_CHECK(allocate_props.contains("dynamic_size"),
-              "Allocate command missing 'dynamic_size' property");
-
-  std::string dynamic_size_str =
-      allocate_props["dynamic_size"].get<std::string>();
-  dynamic_size_ = safe_stoull(dynamic_size_str, "Allocate dynamic size");
+  dynamic_size_ = dynamic_size;
 }
 
 void JobPlanBuilder::executeInitTransfer(const nlohmann::json& cmd) {
