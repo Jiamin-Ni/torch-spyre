@@ -321,13 +321,7 @@ class TestInvokeSubgraphEmbeddingFedOperand(_RegionTestCase):
 
     Same body as ``TestInvokeSubgraphAttention`` (SDPA -> o_proj), but the hidden
     state entering layer 0 comes from an ``nn.Embedding`` inside the graph instead
-    of arriving as a graph input. That single change is what reproduces the
-    Granite 3.3 2B whole-forward failure, and it is why
-    ``hf_granite._run_backbone_forward`` carried an explicit
-    ``h.transpose(1, 2).contiguous().transpose(1, 2).contiguous()`` round trip
-    after the embedding -- a logical no-op whose only effect was to re-materialize
-    the hidden state in the layout the later layers pass. The compiler now does
-    that itself, so that workaround can go.
+    of arriving as a graph input.
 
     Cost parity, not yet an optimization: the compiler inserts the SAME single
     copy the eager path open-coded -- one restickify of the embedding output, with

@@ -491,11 +491,13 @@ def insert_restickify_on_subgraph_operands(
     ``self.inputs``, rendered at codegen via ``codegen_reference()``. So the
     redirect is a reference swap.
 
-    ``inputs`` and ``operands`` are separate fields (``__init__`` passes operands
-    as inputs, then stores operands too) and different readers use different ones
-    -- ``codegen_invoke_subgraph`` reads ``.inputs``, layout seeding reads
-    ``.inputs``, upstream ``create`` populated both. Update both or they disagree
-    about which buffer feeds the body.
+    Only ``inputs`` is repointed. ``InvokeSubgraph`` declares an ``operands``
+    dataclass field, but ``__init__`` never assigns it -- it forwards its
+    ``operands`` argument to ``super().__init__(inputs=operands)`` and sets only
+    ``subgraph`` and ``name`` -- so the field stays ``None`` on every instance,
+    and nothing reads it (``codegen_invoke_subgraph`` and this backend's layout
+    seeding both go through ``.inputs``). Writing a partially-repointed list into
+    it would manufacture the very divergence there is none of today.
 
     A restickify preserves host size/stride and changes only the device layout
     (see ``_fixed_tiled``), which is what makes a bare reference repoint safe
@@ -526,25 +528,18 @@ def insert_restickify_on_subgraph_operands(
             f"device layout may change"
         )
 
-        # Repoint every operand slot naming the old buffer, in both fields, by
-        # position rather than rebuilding -- so a buffer passed twice is handled
-        # and non-buffer operands (ShapeAsConstantBuffer) are left alone.
+        # Repoint every operand slot naming the old buffer, by position rather
+        # than rebuilding -- so a buffer passed twice is handled and non-buffer
+        # operands (ShapeAsConstantBuffer) are left alone. maybe_get_name is
+        # defined on IRNode, so it is total over every operand type and returns
+        # None for the ones that carry no buffer.
         swapped = 0
-        for field in ("inputs", "operands"):
-            seq = getattr(op, field, None)
-            if seq is None:
-                continue
-            new_seq = list(seq)
-            for i, operand in enumerate(new_seq):
-                name = (
-                    operand.maybe_get_name()
-                    if hasattr(operand, "maybe_get_name")
-                    else None
-                )
-                if name == arg_name:
-                    new_seq[i] = restick_buff
-                    swapped += 1
-            setattr(op, field, new_seq)
+        new_inputs = list(op.inputs)
+        for i, operand in enumerate(new_inputs):
+            if operand.maybe_get_name() == arg_name:
+                new_inputs[i] = restick_buff
+                swapped += 1
+        op.inputs = new_inputs
         assert swapped, (
             f"restickify planned for invoke_subgraph {op.get_name()} operand "
             f"{arg_name!r}, but no operand slot names that buffer"

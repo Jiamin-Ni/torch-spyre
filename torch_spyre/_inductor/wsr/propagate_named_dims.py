@@ -141,90 +141,6 @@ def _consume_names(remaining: list[str], layout_size: int) -> list[str]:
     return []
 
 
-def _seed_loop_var_dims(op, named_dims, coords, layout_size):
-    """Map an in-graph named_dims seed onto an op's output layout.
-
-    Returns the loop-var -> names mapping, or ``None`` if the seed cannot be
-    aligned to this layout (the caller then treats the op as unnamed).
-
-    A seed is written against the op's LOGICAL rank (e.g. SDPA's rank-4
-    ``[B, H, S, D]``), but Inductor is free to lower that to a lower-rank
-    physical layout with trailing axes FUSED -- an SDPA-internal matmul on
-    ``[1, 32, 512, 128]`` materializes as ``[1, 512, 4096]`` (32*128 fused).
-    Zipping names positionally against such a layout silently binds the wrong
-    name to each axis ("max_seqlen_q" onto the 4096-wide head*head_dim axis) and
-    drops the remainder, so use each name's DECLARED SIZE to find which names a
-    layout dim covers -- the same rule ``_consume_names`` applies on the input
-    side. Sizes come from ``_named_dims`` when already declared and otherwise
-    from the seed's own positional order, which is what makes a first-seen
-    rank-matched seed self-registering as before.
-    """
-    # Fast path: rank matches, so each name owns one layout dim outright. This
-    # keeps a first-ever seed self-registering (no size known for any name yet).
-    if len(named_dims) == len(layout_size):
-        loop_var_dims: dict[sympy.Symbol, list[str]] = {}
-        for i, (coord, dim_name) in enumerate(zip(coords, named_dims)):
-            # Register the size for every name (including size-1 dims) so
-            # downstream consumers resolve it: named_dims_for_sym filters
-            # on `name in _named_dims`, and _consume_names raises KeyError
-            # for an undeclared name.  setdefault preserves the
-            # declare-once contract (a driver-side declare_tensor_dim or
-            # an earlier op naming the same dim wins).
-            _named_dims.setdefault(dim_name, int(layout_size[i]))
-            # A size-1 dim yields coord == 0 (sym is None): the name stays
-            # in named_dims for positional alignment and is declared
-            # above, but it has no loop var to tile (it is optimized
-            # away), so it is absent from loop_var_dims.
-            sym = _lone_sym(coord)
-            if sym is not None:
-                loop_var_dims[sym] = [dim_name]
-        return loop_var_dims
-
-    # Rank mismatch: align by size. Every name must already have a declared size,
-    # otherwise there is no way to tell which names a fused dim covers.
-    undeclared = [n for n in named_dims if n not in _named_dims]
-    if undeclared:
-        logger.warning(
-            f"{op.get_operation_name()}: named_dims seed {list(named_dims)} has "
-            f"{len(named_dims)} name(s) but output layout has "
-            f"{len(layout_size)} dim(s) {list(layout_size)}, and "
-            f"{undeclared} have no declared size to align by; ignoring the seed"
-        )
-        return None
-
-    loop_var_dims = {}
-    remaining = list(named_dims)
-    for i, coord in enumerate(coords):
-        if not remaining:
-            break
-        dim_size = int(layout_size[i])
-        if dim_size == 1:
-            # Size-1 axes are not annotated (mirrors compute_input_named_dims).
-            continue
-        names = _consume_names(remaining, dim_size)
-        if not names:
-            logger.warning(
-                f"{op.get_operation_name()}: named_dims seed {list(named_dims)} "
-                f"does not align to output layout {list(layout_size)} -- no prefix "
-                f"of {remaining} multiplies to dim {i} (size {dim_size}); "
-                f"ignoring the seed"
-            )
-            return None
-        remaining = remaining[len(names) :]
-        sym = _lone_sym(coord)
-        if sym is not None:
-            # All names covered by this fused axis attach to its single loop var.
-            loop_var_dims.setdefault(sym, []).extend(names)
-    if remaining:
-        logger.warning(
-            f"{op.get_operation_name()}: named_dims seed {list(named_dims)} "
-            f"left {remaining} unconsumed against output layout "
-            f"{list(layout_size)}; ignoring the seed"
-        )
-        return None
-    return loop_var_dims
-
-
 def compute_input_named_dims(dep: MemoryDep, op=None, ind_sizes=None) -> dict:
     """Map loop vars to named dim names for a single input dep."""
     dpi = _get_dim_prop_info(dep)
@@ -512,20 +428,38 @@ def _propagate_named_dims_impl(graph: GraphLowering) -> None:
             if hint:
                 coords = op_out_coords(op)
                 layout_size = op.get_layout().size
-                loop_var_dims = _seed_loop_var_dims(op, named_dims, coords, layout_size)
-                if loop_var_dims is not None:
-                    op._dim_prop_info = _DimPropInfo(  # type: ignore[attr-defined]
-                        named_dims=list(named_dims),
-                        loop_var_dims=loop_var_dims,
+                # zip() below truncates to the shorter of named_dims/layout_size,
+                # so a name-count mismatch would silently drop names (leaving them
+                # unregistered) rather than fail loudly like the input path.  Warn
+                # so a bad in-graph annotation is visible instead of a no-op.
+                if len(named_dims) != len(layout_size):
+                    logger.warning(
+                        f"{op.get_operation_name()}: named_dims hint has "
+                        f"{len(named_dims)} name(s) {named_dims} but output layout "
+                        f"has {len(layout_size)} dim(s) {list(layout_size)}; "
+                        f"extra entries are ignored"
                     )
-                    continue
-                # The seed could not be aligned to this op's layout. Recording a
-                # mis-aligned mapping is worse than recording none: the wrong names
-                # propagate and blow up at a distant consumer (as "reshape split a
-                # named dim") rather than here. Drop the seed and fall through to
-                # the normal inference path below, which derives names from the
-                # op's inputs and falls back to _untracked_* placeholders -- the
-                # same treatment an unseeded op of this shape already gets.
+                loop_var_dims: dict[sympy.Symbol, list[str]] = {}
+                for i, (coord, dim_name) in enumerate(zip(coords, named_dims)):
+                    # Register the size for every name (including size-1 dims) so
+                    # downstream consumers resolve it: named_dims_for_sym filters
+                    # on `name in _named_dims`, and _consume_names raises KeyError
+                    # for an undeclared name.  setdefault preserves the
+                    # declare-once contract (a driver-side declare_tensor_dim or
+                    # an earlier op naming the same dim wins).
+                    _named_dims.setdefault(dim_name, int(layout_size[i]))
+                    # A size-1 dim yields coord == 0 (sym is None): the name stays
+                    # in named_dims for positional alignment and is declared
+                    # above, but it has no loop var to tile (it is optimized
+                    # away), so it is absent from loop_var_dims.
+                    sym = _lone_sym(coord)
+                    if sym is not None:
+                        loop_var_dims[sym] = [dim_name]
+                op._dim_prop_info = _DimPropInfo(  # type: ignore[attr-defined]
+                    named_dims=named_dims,
+                    loop_var_dims=loop_var_dims,
+                )
+                continue
             origins: set = getattr(op.data, "origins", set())
             aten_ops = [str(n.target) for n in origins if hasattr(n, "target")]
             reduction_type = getattr(op.data, "reduction_type", None)
