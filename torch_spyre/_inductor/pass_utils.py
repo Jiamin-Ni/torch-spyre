@@ -2330,24 +2330,6 @@ def compute_restickify_needed(
     op: when provided, index-role deps (gather indices) are never stick-constrained
     and always return (False, None).
 
-    require_exact_layout: demand ``in_stl == out_stl`` rather than mere stick
-    compatibility. Stick compatibility asks only which VARIABLE sits on the stick,
-    so it accepts two layouts that agree there but distribute the remaining
-    coordinates over different device axes -- e.g. device_size [1, 32, 512, 64]
-    vs [512, 32, 1, 64], both with the same stride_map contents and the same
-    stick, differing only in which axis holds the extent-1 placeholder. That is
-    the right question for an ordinary op, whose generated addressing follows the
-    layout it was compiled against. It is the WRONG question wherever one
-    consumer is compiled against a single layout but fed buffers laid out by
-    several independent producers: codegen derives device strides from
-    ``device_size`` POSITIONALLY (``_calculate_device_stride`` in
-    codegen/superdsc.py multiplies the trailing slice, and ``dim_order`` is
-    aligned against ``device_size[-2::-1]``), so axis placement changes the
-    addresses generated, and stride_map agreement does not make the two
-    interchangeable. An ``invoke_subgraph`` body is exactly that consumer: it is
-    codegened once from the first call site and then invoked with every other
-    site's operands. Pass True there.
-
     Returns:
       (False, None)   — stick-compatible: no restickify needed
       (True, stl)     — restickify needed, stl is the target STL for the restickified input
@@ -2361,14 +2343,6 @@ def compute_restickify_needed(
     ind_names, _, ind_sizes = indirect_info_from_op(op)
     if in_dep.name in ind_names:
         return False, None
-    if require_exact_layout and in_stl != out_stl:
-        # Skip the stick-compatibility short-circuit below and go straight to
-        # target selection: out_stl is the layout the consumer was compiled
-        # against, so it is by construction the restickify target.
-        if in_stl.device_dtype != DataFormats.SEN169_FP16:
-            # ReStickifyOpHBM lowers only the native FP16 device format.
-            return True, None
-        return True, out_stl
     idc = try_device_coordinates(in_stl, in_dep, ind_sizes)
     out_idc = try_device_coordinates(out_stl, out_dep, ind_sizes)
     if idc is None or out_idc is None:

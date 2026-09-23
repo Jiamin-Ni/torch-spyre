@@ -346,7 +346,7 @@ class TestInvokeSubgraphEmbeddingFedOperand(_RegionTestCase):
     device strides from ``device_size`` positionally
     (``_calculate_device_stride``), so the body, codegened once from the first
     call site, would address every later site's operand wrongly. Hence
-    ``require_exact_layout`` on the boundary edge in propagate_layouts.
+    ``require_exact`` on the boundary edge in propagate_layouts.
 
     The body must MIX across the axis whose placement differs, or this test cannot
     see the bug: a pointwise body reads every element exactly once and writes each

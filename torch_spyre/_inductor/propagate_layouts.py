@@ -3300,12 +3300,12 @@ def propagate_spyre_tensor_layouts(
             # finalize_layouts plans it via required_input_stls, and
             # insert_restickify materializes it.
             #
-            # require_exact_layout is essential here. Stick compatibility alone
-            # accepts two layouts that agree on the stick variable but place the
+            # require_exact is essential here. Stick compatibility alone accepts
+            # two layouts that agree on the stick variable but place the
             # remaining coordinates on different device axes -- exactly the
             # Granite embedding case ([1, 32, 512, 64] vs [512, 32, 1, 64]) --
             # and codegen's positional stride derivation makes those NOT
-            # interchangeable. Without the flag no copy would be planned.
+            # interchangeable. Without it no copy would be planned.
             #
             # The requirement is a per-edge COST, not a veto: a producer able to
             # commit to the boundary layout pays 0 and no copy is planned. One
@@ -3318,14 +3318,20 @@ def propagate_spyre_tensor_layouts(
                 ]
                 # InvokeSubgraph has MultiOutputLayout and carries no tensor layout
                 # of its own (its results' layouts live on the trailing
-                # MultiOutputs). FixedInOutNode uses out_stl only to answer
-                # required_input_stls(committed), and the requirement here is
-                # per-operand and independent of any output, so the first
-                # operand's boundary STL serves as an inert placeholder.
+                # MultiOutputs), and no output dep either. FixedInOutNode uses
+                # out_stl/out_dep only to answer required_input_stls(committed),
+                # and the requirement here is per-operand and independent of any
+                # output, so the first operand's boundary STL and dep serve as
+                # inert placeholders.
                 out_stl = req_stls[0]
                 op.layouts = [out_stl]
                 op.restick_cost_fn = FixedInOutNode.from_args(
-                    args, out_stl, req_stls, op, require_exact_layout=True
+                    args,
+                    out_stl,
+                    req_stls,
+                    op,
+                    args[0].dep,
+                    exact_input_indices=set(range(len(args))),
                 )
         elif isinstance(op, ExternKernel):
             logger.warning(f"unhandled node type {type(op)}")

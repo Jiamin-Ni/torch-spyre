@@ -66,7 +66,6 @@ class EdgeCostMap:
     ):
         self.dep = dep
         self._op = op
-        self._require_exact_layout = require_exact_layout
         self._in_layouts = in_layouts
         self._target_layouts = target_layouts
         self._target_dep = target_dep

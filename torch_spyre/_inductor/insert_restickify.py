@@ -513,7 +513,7 @@ def insert_restickify_on_node_inputs(
 
 def insert_restickify_on_subgraph_operands(
     op: InvokeSubgraph,
-    resticks_needed: list[dict],
+    resticks_needed: list[RestickifyArgInfo],
     operations: list[Operation],
 ) -> None:
     """Insert restickify nodes before an InvokeSubgraph and repoint its operands.
@@ -548,7 +548,7 @@ def insert_restickify_on_subgraph_operands(
         ) from None
 
     for restick_arg_info in resticks_needed:
-        arg_name = restick_arg_info["arg_name"]
+        arg_name = restick_arg_info.arg_name
         old_layout = V.graph.get_buffer(arg_name).get_layout()
 
         _, restick_buff = _create_restickify_node(restick_arg_info, op)
