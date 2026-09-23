@@ -817,21 +817,27 @@ class SpyreKernel(Kernel[CSEVariable]):
         if "lx" in tensor.layout.allocation and tensor.layout.lx_view is None:
             raise ValueError(f"LX buffer {name} has no physical ownership")
 
-        # Merge in WhileLoop-splice loop_var trip counts (e.g. u0) stashed on
-        # the current op's dim_hints -- self.indirect_sizes only accumulates
-        # entries from indirect_indexing() calls (gather/scatter), but a
-        # tiled per-iteration symbol needs the same {symbol: valid_range}
-        # treatment even though it is not an indirect access. See
-        # loop_var_ranges_from_dim_hints's docstring.
-        indirect_sizes = {
-            **self.indirect_sizes,
-            **loop_var_ranges_from_dim_hints(self.current_node.node),
-        }
+        # A WhileLoop-splice loop variable describes the address advance from
+        # one counted-loop trip to the next, not an in-tile iteration axis.
+        # Its advance is already explicit in loop_info (tiled_dims_per_read/
+        # output_tiled_dims or squeezed_advance_per_read/squeezed_advance_
+        # output, stamped by the WhileLoop-lowering pass -- see
+        # _general_tile_advance's docstring), which that method folds into
+        # device_tile_advance_expr below. Pin every splice loop_var to trip
+        # zero in the base coordinates so the raw unbacked symbol neither
+        # leaks into the OpSpec iteration space nor applies the same
+        # advance a second time.
+        device_tile_advance_expr = self._general_tile_advance(tensor, is_input, name)
+        loop_var_ranges = loop_var_ranges_from_dim_hints(operation)
+        base_index = sympy_subs(
+            tensor.index,
+            {loop_var: sympy.Integer(0) for loop_var in loop_var_ranges},
+        )
         device_coords = alignment_coordinates(
             tensor.layout.device_layout,
-            tensor.index,
+            base_index,
             it_space,
-            indirect_sizes,
+            self.indirect_sizes,
             repeat_info_out=self._alignment_repeat_info,
         )
         work_division = work_division_from_view(
@@ -840,7 +846,6 @@ class SpyreKernel(Kernel[CSEVariable]):
             device_coords,
             it_space,
         )
-        device_tile_advance_expr = self._general_tile_advance(tensor, is_input, name)
         tensor_arg = TensorArg(
             is_input,
             -1,
@@ -1422,6 +1427,10 @@ class SpyreKernel(Kernel[CSEVariable]):
         real pool tensor is allocated immediately before and freed
         immediately after this kernel's .run() call, scoping its lifetime
         tightly to this one bundle's execution.
+
+        The pool tensor, when there is one, is call argument 0, ahead of the
+        tensor arguments. The KTIR emitter opens the kernel's signature with a
+        matching leading slot (``KernelPlan.parameters``).
         """
         wrapper = V.graph.wrapper_code
         call_args = []
@@ -1432,15 +1441,7 @@ class SpyreKernel(Kernel[CSEVariable]):
         # its own unique name -- so deriving the pool variable name from it
         # is collision-free without any extra bookkeeping here.
         pool_var_name = f"_pool_{name}"
-        emit_pool_tensor = uses_pool and _spyre_config.frontend_pool_allocation
-        if emit_pool_tensor and _spyre_config.ktir_emitter:
-            raise AssertionError(
-                "config.frontend_pool_allocation is not supported on the KTIR "
-                "emitter path: async_compile.ktir() takes no pool_size and the "
-                "KTIR emitter threads hbm_pool buffers as internal SSA values, "
-                "so a front-end pool argument would shift every tensor's "
-                "positional address binding."
-            )
+        emit_pool_tensor = uses_pool and _spyre_config.pool_allocated_by_frontend()
         if emit_pool_tensor:
             device = V.graph.get_current_device_or_throw()
             wrapper.writeline(
