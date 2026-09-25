@@ -2978,19 +2978,48 @@ def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
 
 def propagate_spyre_tensor_layouts(
     graph: GraphLowering,
+    input_stls: "list | None" = None,
 ) -> None:
+    """Assign device layouts to every operation in ``graph``.
+
+    input_stls: seed the graph inputs from this list -- one
+    ``SpyreTensorLayout | None`` per entry of ``graph.graph_input_names``, a
+    ``None`` leaving that input unseeded -- instead of discovering them. Only
+    meaningful for an ``invoke_subgraph`` body, where the default is
+    ``_subgraph_input_stls`` (the layouts the parent committed for the HOP's
+    operands).
+
+    The parameter exists because the seeds cannot be injected any other way:
+    this function OVERWRITES ``graph_inputs[name].layouts`` at its start, so
+    pre-setting that attribute and calling it has no effect (see
+    ``tests/inductor/test_propagate_layouts_rerun.py``, which pins that
+    behaviour). It lets a caller ask the counterfactual "what layouts would this
+    body produce IF its operands arrived as L?" -- the question a boundary
+    negotiation has to answer per candidate. The pass is idempotent, so asking
+    repeatedly is safe.
+    """
     operations = graph.operations
     # Convert InputBuffers from FixedLayout to SpyreTensorLayouts
     if len(graph.graph_input_names) > 0:
-        sub_stls = _subgraph_input_stls(graph)
+        sub_stls = input_stls if input_stls is not None else _subgraph_input_stls(graph)
         if sub_stls is not None:
             # An invoke_subgraph body: seed from the HOP's operands (see
             # _subgraph_input_stls), not from the parent's V.real_inputs, which
             # do not correspond to this graph's placeholders.
+            if len(sub_stls) != len(graph.graph_input_names):
+                raise Unsupported(
+                    f"subgraph {graph.name!r} has "
+                    f"{len(graph.graph_input_names)} inputs but "
+                    f"{len(sub_stls)} seed layout(s) were supplied; cannot map "
+                    f"them onto the graph's placeholders positionally"
+                )
             logger.debug(
-                "%s: seeding %d input layout(s) from invoke_subgraph operands",
+                "%s: seeding %d input layout(s) from %s",
                 graph.name,
                 len(sub_stls),
+                "caller-supplied layouts"
+                if input_stls is not None
+                else "invoke_subgraph operands",
             )
             for name, stl in zip(graph.graph_input_names, sub_stls):
                 if stl is None:
