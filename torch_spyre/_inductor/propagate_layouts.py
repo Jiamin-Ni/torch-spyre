@@ -2963,6 +2963,7 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
         return
 
     by_name: dict = {}
+    candidates_by_name: dict = {}
     for op in graph.operations:
         name = op.maybe_get_name()
         if name not in output_names:
@@ -2970,6 +2971,9 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
         committed = op.maybe_get_layout()
         if isinstance(committed, FixedTiledLayout):
             by_name[name] = committed.device_layout
+        stashed = getattr(op, "_subgraph_output_candidates", None)
+        if stashed:
+            candidates_by_name[name] = stashed
     if not by_name:
         return
     body_stls = [by_name.get(name) for name in output_names]
@@ -3001,6 +3005,23 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
             declared_stl = declared.device_layout
             if body_stl == declared_stl:
                 continue
+            # Was the declared layout even available to the body's beam? The two
+            # cases want different fixes, so name which one this is.
+            cands = candidates_by_name.get(output_names[idx]) or []
+            reachable = any(c == declared_stl for c in cands)
+            if cands:
+                diagnosis = (
+                    f"the body HAD that layout among its {len(cands)} candidates "
+                    f"and its own optimizer chose otherwise, so the body needs to "
+                    f"be constrained to the boundary layout"
+                    if reachable
+                    else f"that layout was NOT among the body's {len(cands)} "
+                    f"candidates {[list(c.device_size) for c in cands]}, so the "
+                    f"body cannot produce it and the parent's declaration is "
+                    f"the thing that has to change"
+                )
+            else:
+                diagnosis = "the body's candidate layouts were not recorded"
             raise Unsupported(
                 f"invoke_subgraph body {graph.name!r} produces output "
                 f"{output_names[idx]} (position {idx}) with device layout "
@@ -3011,7 +3032,7 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
                 f"already committed its consumers to that; the subgraph "
                 f"result layout is declared (generic_layout) rather than "
                 f"derived from the body, so a body that commits a different "
-                f"orientation cannot be served"
+                f"orientation cannot be served. Diagnosis: {diagnosis}"
             )
 
 
@@ -3493,6 +3514,21 @@ def propagate_spyre_tensor_layouts(
             logger.warning(f"unhandled operation type {type(op)}")
 
     _resolve_copy_back_candidates(operations)
+
+    # Record each output op's candidate layouts for validate_subgraph_output_layouts,
+    # which runs after finalize_layouts has deleted `layouts`. Knowing whether the
+    # layout the parent declared was even AMONG the body's candidates separates two
+    # very different situations: the body's beam rejecting a reachable layout (an
+    # enforcement problem -- constrain the body) from the layout never being
+    # available at all (a real incompatibility).
+    if getattr(graph, "parent", None) is not None:
+        output_names = set(graph.get_output_names())
+        for op in operations:
+            name = op.maybe_get_name()
+            if name in output_names:
+                layouts = getattr(op, "layouts", None)
+                if layouts:
+                    op._subgraph_output_candidates = list(layouts)  # type: ignore[attr-defined]
 
 
 def _real_layout_matches_op_size(
