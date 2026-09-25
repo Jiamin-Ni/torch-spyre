@@ -514,6 +514,52 @@ class TestSubgraphOutputLayoutValidation(_RegionTestCase):
         self.assertIn("invoke_subgraph body", message)
         self.assertIn("produces output", message)
 
+    def test_multi_output_body_compiles(self):
+        """A body with SEVERAL outputs must not trip the check by mispairing them.
+
+        The validator compares the body's outputs against the parent's declared
+        result layouts, and those have to be paired BY POSITION. A region whose
+        body returns more than one value -- which an autograd-partitioned region
+        does, returning its result plus saved activations plus passthrough primals
+        -- has outputs of unrelated shapes, so comparing all of them against all
+        the parent's MultiOutputs reports a mismatch between a hidden state and a
+        weight that no real disagreement produced.
+
+        An embedding-fed stack is the shortest route to such a body: it makes the
+        region take a produced hidden state, and the partitioner then gives the
+        body three outputs. Before the fix this raised
+
+            produces output ..._buf1 with device layout [64, 2, 8, 64]/...,
+            but the parent declared [2, 128, 64]/... for buf4
+
+        -- body output 0 (the hidden state) against the MultiOutput selecting
+        index 2 (the weight).
+        """
+        embed = nn.Embedding(_VOCAB, 128).eval()
+        embed.to(device=DEVICE_NAME, dtype=torch.float16)
+
+        # The matmul must be INSIDE the region: that is what makes the partitioner
+        # save activations, giving the body its extra outputs.
+        @nested_compile_region
+        def matmul_region(h, w):
+            return torch.relu(h @ w)
+
+        def outer(ids, w):
+            h = embed(ids)
+            for _ in range(3):
+                h = matmul_region(h, w)
+            return h
+
+        ids = torch.randint(0, _VOCAB, (8, 64), device=DEVICE_NAME)
+        w = torch.randn(128, 128, dtype=torch.float16, device=DEVICE_NAME)
+
+        seen_hops = []
+        compiled = self._compile_counting_hops(outer, seen_hops)
+        out = compiled(ids, w).cpu()
+
+        self.assertEqual(tuple(out.shape), (8, 64, 128))
+        self._assert_regions_not_inlined(seen_hops, expected=2)
+
 
 if __name__ == "__main__":
     unittest.main()

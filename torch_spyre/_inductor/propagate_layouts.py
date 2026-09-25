@@ -2890,6 +2890,20 @@ def _subgraph_input_stls(graph: GraphLowering) -> list | None:
     return resolved
 
 
+def _multi_output_index(op) -> "int | None":
+    """Which output position this ``MultiOutput`` selects from its producer.
+
+    ``indices`` is a list of (container-type, key) steps. For a HOP or fallback
+    result it is a single tuple/list index step, so the first integer key is the
+    position. Returns ``None`` when no integer index is present (e.g. a dict-keyed
+    selection), which callers treat as "cannot pair by position".
+    """
+    for entry in op.indices or []:
+        if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[1], int):
+            return entry[1]
+    return None
+
+
 def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
     """Check a subgraph body produces the output layout its parent declared.
 
@@ -2915,30 +2929,37 @@ def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
     body propagates, the parent has been through ``finalize_layouts``, which
     deletes ``layouts`` and folds the committed STL into a ``FixedTiledLayout``.
 
+    Pairs BY POSITION. A body commonly returns several outputs of unrelated shapes
+    -- an autograd-partitioned region returns its result plus saved activations
+    plus passthrough primals -- so output i must be compared against the
+    ``MultiOutput`` selecting index i. Comparing every output against every
+    ``MultiOutput`` reports false mismatches between, say, a hidden state and a
+    weight.
+
     Raises ``Unsupported`` on disagreement. Silent on anything it cannot compare
-    -- a body output with no layouts, or a parent ``MultiOutput`` not yet
-    committed -- since this is a safety net, not a new requirement.
+    -- a body output with no layouts, a parent ``MultiOutput`` not yet committed,
+    or one whose position cannot be determined -- since this is a safety net, not
+    a new requirement.
     """
     parent = getattr(graph, "parent", None)
     if parent is None:
         return
 
-    output_names = set(graph.get_output_names())
+    # Indexable, not a set: position i of this list is body output i.
+    output_names = list(graph.get_output_names())
     if not output_names:
         return
 
-    # The body's own output layouts, in graph_outputs order. graph_outputs holds
-    # IRNodes (a StorageBox per output), so resolve each to the operation that
-    # produced it by name.
-    body_stls: dict[str, SpyreTensorLayout] = {}
+    by_name: dict = {}
     for op in graph.operations:
         name = op.maybe_get_name()
         if name in output_names:
             layouts = getattr(op, "layouts", None)
             if layouts:
-                body_stls[name] = layouts[0]
-    if not body_stls:
+                by_name[name] = layouts[0]
+    if not by_name:
         return
+    body_stls = [by_name.get(name) for name in output_names]
 
     for hop in parent.operations:
         if not isinstance(hop, InvokeSubgraph):
@@ -2946,8 +2967,8 @@ def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
         sub = hop.subgraph
         if sub is None or sub.graph is not graph:
             continue
-        # The results of this HOP are the MultiOutputs reading it. Each carries
-        # one output position's layout; the HOP itself has MultiOutputLayout.
+        # The results of this HOP are the MultiOutputs reading it; each selects one
+        # output position via its indices.
         for mo in parent.operations:
             if not isinstance(mo, MultiOutput):
                 continue
@@ -2958,22 +2979,27 @@ def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
             declared = mo.maybe_get_layout()
             if not isinstance(declared, FixedTiledLayout):
                 continue
+            idx = _multi_output_index(mo)
+            if idx is None or not (0 <= idx < len(body_stls)):
+                continue
+            body_stl = body_stls[idx]
+            if body_stl is None:
+                continue
             declared_stl = declared.device_layout
-            for body_name, body_stl in body_stls.items():
-                if body_stl == declared_stl:
-                    continue
-                raise Unsupported(
-                    f"invoke_subgraph body {graph.name!r} produces output "
-                    f"{body_name} with device layout "
-                    f"{list(body_stl.device_size)}/"
-                    f"{list(body_stl.stride_map)}, but the parent declared "
-                    f"{list(declared_stl.device_size)}/"
-                    f"{list(declared_stl.stride_map)} for {mo.get_name()} and "
-                    f"already committed its consumers to that; the subgraph "
-                    f"result layout is declared (generic_layout) rather than "
-                    f"derived from the body, so a body that commits a different "
-                    f"orientation cannot be served"
-                )
+            if body_stl == declared_stl:
+                continue
+            raise Unsupported(
+                f"invoke_subgraph body {graph.name!r} produces output "
+                f"{output_names[idx]} (position {idx}) with device layout "
+                f"{list(body_stl.device_size)}/"
+                f"{list(body_stl.stride_map)}, but the parent declared "
+                f"{list(declared_stl.device_size)}/"
+                f"{list(declared_stl.stride_map)} for {mo.get_name()} and "
+                f"already committed its consumers to that; the subgraph "
+                f"result layout is declared (generic_layout) rather than "
+                f"derived from the body, so a body that commits a different "
+                f"orientation cannot be served"
+            )
 
 
 def propagate_spyre_tensor_layouts(
