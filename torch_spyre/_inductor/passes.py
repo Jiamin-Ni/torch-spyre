@@ -64,6 +64,7 @@ from .wsr.propagate_named_dims import (
 from .propagate_layouts import (
     propagate_mutation_layouts,
     propagate_spyre_tensor_layouts,
+    validate_subgraph_output_layouts,
 )
 from .nonstick_dim_order import reorder_nonstick_dims
 from .optimize_restickify import optimize_restickify_locations
@@ -548,6 +549,13 @@ class CustomPreSchedulingPasses:
             validate_ops,
             optimize_restickify_locations,
             finalize_layouts,
+            # Must follow finalize_layouts: it compares an invoke_subgraph body's
+            # COMMITTED output layout against the layout its parent declared, and
+            # the committed value does not exist until finalize_layouts folds the
+            # beam's choice into a FixedTiledLayout. Comparing candidates instead
+            # reports conflicts that never materialise -- a body's output commonly
+            # has several candidates and its beam picks the one the parent wanted.
+            validate_subgraph_output_layouts,
             # insert_restickify's advance-transfer logic (see its own
             # docstring) branches on whether old_name already has
             # `loop_info` stamped, to decide whether the per-trip advance

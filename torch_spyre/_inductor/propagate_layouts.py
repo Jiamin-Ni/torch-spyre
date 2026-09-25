@@ -2904,8 +2904,11 @@ def _multi_output_index(op) -> "int | None":
     return None
 
 
-def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
+def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
     """Check a subgraph body produces the output layout its parent declared.
+
+    Runs as its own pass AFTER ``finalize_layouts``, because both sides of the
+    comparison must be committed layouts -- see below.
 
     The parent stamps ``generic_layout`` on each ``MultiOutput`` that carries an
     ``invoke_subgraph`` result (see the ``MultiOutput`` branch of the main loop)
@@ -2929,6 +2932,15 @@ def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
     body propagates, the parent has been through ``finalize_layouts``, which
     deletes ``layouts`` and folds the committed STL into a ``FixedTiledLayout``.
 
+    Compares COMMITTED layouts on both sides, which is why this runs after the
+    body's ``finalize_layouts`` rather than at the end of its propagation. A body
+    output routinely has SEVERAL candidate layouts, and which one it uses is
+    chosen by the body's own beam afterwards: a body measured with candidates
+    ``[[64, 2, 8, 64], [128, 1, 8, 64]]`` committed the first, which was exactly
+    what the parent had declared. Comparing ``layouts[0]`` -- an arbitrary member
+    of a set nothing had chosen from yet -- therefore reports conflicts that never
+    materialise. Only the committed value is a fact.
+
     Pairs BY POSITION. A body commonly returns several outputs of unrelated shapes
     -- an autograd-partitioned region returns its result plus saved activations
     plus passthrough primals -- so output i must be compared against the
@@ -2937,9 +2949,9 @@ def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
     weight.
 
     Raises ``Unsupported`` on disagreement. Silent on anything it cannot compare
-    -- a body output with no layouts, a parent ``MultiOutput`` not yet committed,
-    or one whose position cannot be determined -- since this is a safety net, not
-    a new requirement.
+    -- either side not carrying a committed ``FixedTiledLayout``, or a
+    ``MultiOutput`` whose position cannot be determined -- since this is a safety
+    net, not a new requirement.
     """
     parent = getattr(graph, "parent", None)
     if parent is None:
@@ -2953,10 +2965,11 @@ def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
     by_name: dict = {}
     for op in graph.operations:
         name = op.maybe_get_name()
-        if name in output_names:
-            layouts = getattr(op, "layouts", None)
-            if layouts:
-                by_name[name] = layouts[0]
+        if name not in output_names:
+            continue
+        committed = op.maybe_get_layout()
+        if isinstance(committed, FixedTiledLayout):
+            by_name[name] = committed.device_layout
     if not by_name:
         return
     body_stls = [by_name.get(name) for name in output_names]
@@ -3480,11 +3493,6 @@ def propagate_spyre_tensor_layouts(
             logger.warning(f"unhandled operation type {type(op)}")
 
     _resolve_copy_back_candidates(operations)
-
-    # For an invoke_subgraph body, every op now has its layouts, so the parent's
-    # declared result layout can finally be checked against what the body
-    # actually produces. No-op for a top-level graph.
-    _validate_subgraph_output_stls(graph)
 
 
 def _real_layout_matches_op_size(
