@@ -26,8 +26,11 @@ tests exercise:
 - ``TestInvokeSubgraphEmbeddingFedOperand`` -- the same attention body, but with
   the layer-0 hidden state produced by an in-graph embedding, so the call sites
   disagree about the operand's device layout.
+- ``TestSubgraphOutputLayoutValidation`` -- the RESULT side: forces the parent's
+  declared result layout to disagree with what the body produces, and checks that
+  ``_validate_subgraph_output_stls`` raises instead of miscompiling.
 
-Both assert on the FX graph Inductor actually receives: if Dynamo inlined the
+These assert on the FX graph Inductor actually receives: if Dynamo inlined the
 regions into the parent there is no subgraph at all, and a test that only
 checked shapes or numerics would pass while guarding nothing.
 """
@@ -329,12 +332,15 @@ class TestInvokeSubgraphEmbeddingFedOperand(_RegionTestCase):
     why one fixed boundary layout is the conservative first choice and how it
     could be sharpened later.
 
-    Covers the OPERAND side of the boundary only. Subgraph RESULTS are declared to
-    carry the generic layout by the ``MultiOutput`` branch of
-    ``propagate_spyre_tensor_layouts``, and nothing verifies the body produces it;
-    Granite 3.3 2B happens to comply, so this test passes without exercising that
-    half. A body whose last op committed a different orientation would disagree
-    silently -- see the comment on that branch.
+    Covers the OPERAND side of the boundary only. Subgraph RESULTS are still
+    DECLARED to carry the generic layout by the ``MultiOutput`` branch of
+    ``propagate_spyre_tensor_layouts`` rather than derived from the body; Granite
+    3.3 2B happens to comply, so this test passes without exercising that half.
+    A disagreement there no longer passes silently --
+    ``_validate_subgraph_output_stls`` raises once the body has been propagated
+    (see ``TestSubgraphOutputLayoutValidation``) -- but detection is not the same
+    as support: a body that legitimately wants another orientation still cannot
+    be compiled until the result layout is derived instead of declared.
 
     The asymmetry: layer 0's operand is the embedding output, committed as
     ``device_size=[1, 32, 512, 64]`` / ``stride_map=[-1, 64, 2048, 1]``; layers
@@ -415,6 +421,98 @@ class TestInvokeSubgraphEmbeddingFedOperand(_RegionTestCase):
             rtol=0.2,
             target=out.float(),
         )
+
+
+class TestSubgraphOutputLayoutValidation(_RegionTestCase):
+    """The parent's DECLARED subgraph-result layout must be checked against the body.
+
+    ``propagate_spyre_tensor_layouts`` stamps ``generic_layout`` on every
+    ``MultiOutput`` carrying an ``invoke_subgraph`` result, with
+    ``AnyInNode.from_args()`` -- empty ``edge_costs``, zero cost, empty
+    ``required_input_stls()``. So the layout is a declaration that nothing
+    enforces. A body whose final op committed a different orientation would have
+    its result addressed through the wrong device strides by the parent's
+    consumers, with no error: the wrong-token class of failure, not a crash.
+
+    ``_validate_subgraph_output_stls`` closes that by comparing the body's actual
+    output layout against the parent's committed one once the body has been
+    propagated. This test forces the disagreement the check exists to catch,
+    because a check that cannot be shown to fire is worth nothing.
+
+    The perturbation targets the LAST ``MultiOutput`` deliberately. In a stacked
+    region, layer N's result is also layer N+1's operand, so perturbing any
+    earlier one is caught first by the existing cross-site OPERAND check
+    (``_subgraph_input_stls``) and would not exercise the output path at all. The
+    last result feeds nothing downstream, so only the output check can see it.
+    """
+
+    def test_declared_output_layout_disagreeing_with_body_raises(self):
+        from unittest.mock import patch
+
+        from torch._inductor.ir import MultiOutput
+
+        import torch_spyre._inductor.passes as _passes
+        from torch_spyre._C import SpyreTensorLayout
+        from torch_spyre._inductor.ir import FixedTiledLayout
+
+        real_finalize = _passes.finalize_layouts
+        perturbed = []
+
+        def finalize_then_perturb(graph):
+            real_finalize(graph)
+            if getattr(graph, "parent", None) is not None:
+                return  # only the parent declares result layouts
+            mos = [op for op in graph.operations if isinstance(op, MultiOutput)]
+            if not mos:
+                return
+            op = mos[-1]
+            layout = op.maybe_get_layout()
+            if not isinstance(layout, FixedTiledLayout):
+                return
+            dl = layout.device_layout
+            dev_size = list(dl.device_size)
+            stride_map = list(dl.stride_map)
+            if len(dev_size) < 3:
+                return
+            # Swap the two outermost device axes: same extents, same stick, so
+            # stick_compatible would accept it -- exactly the class of mismatch
+            # that slips past ordinary compatibility checks.
+            dev_size[0], dev_size[1] = dev_size[1], dev_size[0]
+            stride_map[0], stride_map[1] = stride_map[1], stride_map[0]
+            op.layout = FixedTiledLayout(
+                layout.device,
+                layout.dtype,
+                layout.size,
+                layout.stride,
+                SpyreTensorLayout(
+                    dev_size, stride_map, dl.device_dtype, dl.element_arrangement
+                ),
+                layout.offset,
+            )
+            perturbed.append(op.get_name())
+
+        blocks = [_region(_Block()) for _ in range(2)]
+
+        def outer(h):
+            for b in blocks:
+                h = b(h)
+            return h
+
+        h = torch.randn(8, 64, 128, dtype=torch.float16, device=DEVICE_NAME)
+
+        with patch.object(_passes, "finalize_layouts", finalize_then_perturb):
+            compiled = torch.compile(outer, dynamic=False, fullgraph=True)
+            with self.assertRaises(Exception) as cm:
+                compiled(h)
+
+        self.assertTrue(
+            perturbed,
+            "no MultiOutput was perturbed, so the check was never given a "
+            "disagreement to find",
+        )
+        message = str(cm.exception)
+        self.assertIn("invoke_subgraph body", message)
+        self.assertIn("produces output", message)
 
 
 if __name__ == "__main__":

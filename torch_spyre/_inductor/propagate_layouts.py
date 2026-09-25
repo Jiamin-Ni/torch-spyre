@@ -2890,6 +2890,92 @@ def _subgraph_input_stls(graph: GraphLowering) -> list | None:
     return resolved
 
 
+def _validate_subgraph_output_stls(graph: GraphLowering) -> None:
+    """Check a subgraph body produces the output layout its parent declared.
+
+    The parent stamps ``generic_layout`` on each ``MultiOutput`` that carries an
+    ``invoke_subgraph`` result (see the ``MultiOutput`` branch of the main loop)
+    with ``AnyInNode.from_args()`` -- whose ``edge_costs`` is empty, whose
+    ``cost()`` is 0.0 and whose ``required_input_stls()`` is ``[]``. So that
+    layout is a DECLARATION that nothing enforces: no edge, no cost, no
+    restickify planned. If the body's final op commits a different orientation,
+    the parent's consumers address the result through the wrong device strides
+    and the graph miscompiles silently.
+
+    The declaration cannot simply be replaced by the body's real layout at the
+    time it is made: the parent's whole pre-scheduling pipeline runs at its own
+    ``_update_scheduler``, while the body's does not run until
+    ``codegen_subgraph_common`` recurses into it during parent codegen -- so when
+    the parent declares, the body has no layouts yet. What IS possible is to
+    check the declaration once the body has been propagated, which is what this
+    does. Deriving the layout instead of declaring it is the follow-on change;
+    this converts a silent wrong-layout into a clear error meanwhile.
+
+    Reads the parent's COMMITTED layout, not its ``.layouts``: by the time the
+    body propagates, the parent has been through ``finalize_layouts``, which
+    deletes ``layouts`` and folds the committed STL into a ``FixedTiledLayout``.
+
+    Raises ``Unsupported`` on disagreement. Silent on anything it cannot compare
+    -- a body output with no layouts, or a parent ``MultiOutput`` not yet
+    committed -- since this is a safety net, not a new requirement.
+    """
+    parent = getattr(graph, "parent", None)
+    if parent is None:
+        return
+
+    output_names = set(graph.get_output_names())
+    if not output_names:
+        return
+
+    # The body's own output layouts, in graph_outputs order. graph_outputs holds
+    # IRNodes (a StorageBox per output), so resolve each to the operation that
+    # produced it by name.
+    body_stls: dict[str, SpyreTensorLayout] = {}
+    for op in graph.operations:
+        name = op.maybe_get_name()
+        if name in output_names:
+            layouts = getattr(op, "layouts", None)
+            if layouts:
+                body_stls[name] = layouts[0]
+    if not body_stls:
+        return
+
+    for hop in parent.operations:
+        if not isinstance(hop, InvokeSubgraph):
+            continue
+        sub = hop.subgraph
+        if sub is None or sub.graph is not graph:
+            continue
+        # The results of this HOP are the MultiOutputs reading it. Each carries
+        # one output position's layout; the HOP itself has MultiOutputLayout.
+        for mo in parent.operations:
+            if not isinstance(mo, MultiOutput):
+                continue
+            if not any(
+                inp.maybe_get_name() == hop.get_name() for inp in (mo.inputs or [])
+            ):
+                continue
+            declared = mo.maybe_get_layout()
+            if not isinstance(declared, FixedTiledLayout):
+                continue
+            declared_stl = declared.device_layout
+            for body_name, body_stl in body_stls.items():
+                if body_stl == declared_stl:
+                    continue
+                raise Unsupported(
+                    f"invoke_subgraph body {graph.name!r} produces output "
+                    f"{body_name} with device layout "
+                    f"{list(body_stl.device_size)}/"
+                    f"{list(body_stl.stride_map)}, but the parent declared "
+                    f"{list(declared_stl.device_size)}/"
+                    f"{list(declared_stl.stride_map)} for {mo.get_name()} and "
+                    f"already committed its consumers to that; the subgraph "
+                    f"result layout is declared (generic_layout) rather than "
+                    f"derived from the body, so a body that commits a different "
+                    f"orientation cannot be served"
+                )
+
+
 def propagate_spyre_tensor_layouts(
     graph: GraphLowering,
 ) -> None:
@@ -3339,6 +3425,11 @@ def propagate_spyre_tensor_layouts(
             logger.warning(f"unhandled operation type {type(op)}")
 
     _resolve_copy_back_candidates(operations)
+
+    # For an invoke_subgraph body, every op now has its layouts, so the parent's
+    # declared result layout can finally be checked against what the body
+    # actually produces. No-op for a top-level graph.
+    _validate_subgraph_output_stls(graph)
 
 
 def _real_layout_matches_op_size(
