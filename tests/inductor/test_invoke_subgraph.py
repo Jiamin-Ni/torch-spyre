@@ -561,5 +561,143 @@ class TestSubgraphOutputLayoutValidation(_RegionTestCase):
         self._assert_regions_not_inlined(seen_hops, expected=2)
 
 
+class TestSubgraphResultOperandRestickify(_RegionTestCase):
+    """A subgraph RESULT feeding the next call site can be restickified.
+
+    In a stacked region, layer N's result (a ``MultiOutput``) is layer N+1's
+    operand. When its layout differs from the layout the body is compiled against,
+    it has to be copied before the next call, like any intermediate operand. Two
+    things had to work for that:
+
+    - ``_subgraph_operand_args`` gives the operand an edge at all (it used to skip
+      ``MultiOutput`` on the grounds that it always carried the generic layout);
+    - ``_create_restickify_node`` can build a copy whose source is a
+      ``MultiOutput``. The ``getitem`` node that selects a result is never in
+      ``graph.env``, so the builder now makes the copy from the buffer itself.
+
+    With the default boundary layout the results already comply and nothing is
+    copied; the forced test swaps the boundary's two outer device axes so every
+    chained result disagrees and must be copied.
+    """
+
+    @staticmethod
+    def _stack_inputs():
+        torch.manual_seed(0)
+        embed = nn.Embedding(_VOCAB, 128).eval()
+        w = torch.randn(128, 128, dtype=torch.float16) * 0.05
+        ids = torch.randint(0, _VOCAB, (8, 64))
+        return embed, w, ids
+
+    def _compile_stack(self, embed, w, ids, boundary=None):
+        from unittest.mock import patch
+
+        import torch_spyre._inductor.insert_restickify as _ir
+        import torch_spyre._inductor.propagate_layouts as _pl
+
+        @nested_compile_region
+        def region(h, weight):
+            return torch.relu(h @ weight)
+
+        def outer(tokens, weight):
+            h = embed(tokens)
+            for _ in range(3):
+                h = region(h, weight)
+            return h
+
+        # (hop, restickified source, op-list positions of source/copy/hop)
+        events = []
+        real_insert = _ir.insert_restickify_on_subgraph_operands
+
+        def recording_insert(op, resticks, operations):
+            before = [i.maybe_get_name() for i in op.inputs]
+            real_insert(op, resticks, operations)
+            after = [i.maybe_get_name() for i in op.inputs]
+            names = [o.get_name() for o in operations]
+            # Each repointed slot names the source before and its copy after.
+            for src, copy in zip(before, after):
+                if src != copy:
+                    events.append(
+                        (
+                            op.get_name(),
+                            src,
+                            names.index(src),
+                            names.index(copy),
+                            names.index(op.get_name()),
+                        )
+                    )
+
+        patches = [
+            patch.object(
+                _ir, "insert_restickify_on_subgraph_operands", recording_insert
+            )
+        ]
+        if boundary is not None:
+            patches.append(patch.object(_pl, "_subgraph_boundary_stl", boundary))
+
+        embed.to(device=DEVICE_NAME, dtype=torch.float16)
+        seen_hops = []
+        for p in patches:
+            p.start()
+        try:
+            compiled = self._compile_counting_hops(outer, seen_hops)
+            out = compiled(ids.to(DEVICE_NAME), w.to(DEVICE_NAME)).cpu().float()
+        finally:
+            for p in patches:
+                p.stop()
+        self._assert_regions_not_inlined(seen_hops, expected=3)
+        return out, events
+
+    @staticmethod
+    def _reference(embed, w, ids):
+        ref = nn.Embedding(_VOCAB, 128).eval()
+        ref.load_state_dict({k: v.cpu().float() for k, v in embed.state_dict().items()})
+        h = ref(ids)
+        for _ in range(3):
+            h = torch.relu(h @ w.float())
+        return h
+
+    def test_default_boundary_copies_no_result(self):
+        embed, w, ids = self._stack_inputs()
+        out, events = self._compile_stack(embed, w, ids)
+        # Only the embedding (site 0) may need a copy; the chained results carry
+        # the generic layout, which IS the default boundary.
+        self.assertLessEqual(len(events), 1, events)
+        torch.testing.assert_close(
+            out, self._reference(embed, w, ids), atol=0.05, rtol=0.05
+        )
+
+    def test_forced_boundary_copies_every_chained_result(self):
+        import torch_spyre._inductor.propagate_layouts as _pl
+        from torch_spyre._C import SpyreTensorLayout
+
+        real_boundary = _pl._subgraph_boundary_stl
+
+        def swapped_boundary(buf):
+            # Same extents, same stick (last axis untouched), different placement
+            # of the outer coordinates -- stick_compatible accepts it, require_exact
+            # does not, so every operand not already in it must be copied.
+            stl = real_boundary(buf)
+            dev_size = list(stl.device_size)
+            stride_map = list(stl.stride_map)
+            dev_size[0], dev_size[1] = dev_size[1], dev_size[0]
+            stride_map[0], stride_map[1] = stride_map[1], stride_map[0]
+            return SpyreTensorLayout(
+                dev_size, stride_map, stl.device_dtype, stl.element_arrangement
+            )
+
+        embed, w, ids = self._stack_inputs()
+        out, events = self._compile_stack(embed, w, ids, boundary=swapped_boundary)
+
+        # Site 0 copies the embedding; sites 1 and 2 copy the previous site's
+        # result. So three copies, and the last two have MultiOutput sources.
+        self.assertEqual(len(events), 3, events)
+        for hop, src, src_pos, copy_pos, hop_pos in events:
+            self.assertLess(src_pos, copy_pos, f"{hop}: copy before its source")
+            self.assertLess(copy_pos, hop_pos, f"{hop}: copy after its consumer")
+        torch.testing.assert_close(
+            out, self._reference(embed, w, ids), atol=0.05, rtol=0.05
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -37,6 +37,7 @@ from torch._inductor.ir import (
     InputBuffer,
     InvokeSubgraph,
     IRNode,
+    MultiOutput,
     MutableBox,
     MutationLayoutSHOULDREMOVE,
     Operation,
@@ -241,16 +242,26 @@ def _create_restickify_node(
             env[tb_fx_node] = tb
     graph_lowering.env.update(env)
 
-    # Search env by buffer name to find the FX node to pass to restickify.
-    fx_arg_node = next(
-        (
-            fx_node
-            for fx_node, tb in graph_lowering.env.items()
-            if isinstance(fx_node, torch.fx.Node)
-            and isinstance(tb, TensorBox)
-            and tb.get_name() == arg_name
-        ),
-        None,
+    # A MultiOutput (one result of an invoke_subgraph or fallback) is selected
+    # by a getitem FX node that is never recorded in env, so a name search cannot
+    # find its real producer node. Worse, it can match by COINCIDENCE: a result
+    # whose origins point at the HOP resolves through the HOP's own FX node. Build
+    # it from the buffer instead, like the synthetic buffers below -- a
+    # MultiOutput is a real buffer with a committed layout and needs no FX node.
+    source_buf = graph_lowering.try_get_buffer(arg_name)
+    fx_arg_node = (
+        None
+        if isinstance(source_buf, MultiOutput)
+        else next(
+            (
+                fx_node
+                for fx_node, tb in graph_lowering.env.items()
+                if isinstance(fx_node, torch.fx.Node)
+                and isinstance(tb, TensorBox)
+                and tb.get_name() == arg_name
+            ),
+            None,
+        )
     )
     first_compute_node = next(n for n in fx_graph.nodes if n.op != "placeholder")
 
@@ -260,9 +271,10 @@ def _create_restickify_node(
         # directly; realize() inside lower_restickify registers the output in
         # graph.buffers and graph.operations.
         arg_buf = graph_lowering.get_buffer(arg_name)
-        assert isinstance(arg_buf, ComputedBuffer), (
+        assert isinstance(arg_buf, (ComputedBuffer, MultiOutput)), (
             f"_create_restickify_node: buffer {arg_name!r} not found in env and is "
-            f"{type(arg_buf).__name__}, not ComputedBuffer — cannot restickify"
+            f"{type(arg_buf).__name__}, not ComputedBuffer or MultiOutput — cannot "
+            f"restickify"
         )
         arg_tb = TensorBox(StorageBox(arg_buf))
         # Insert a synthetic FX node for origins — downstream code (e.g.

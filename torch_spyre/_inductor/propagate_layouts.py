@@ -2765,14 +2765,17 @@ def _subgraph_operand_args(op) -> list[PropArg]:
 
     Only operands the compiler OWNS get an edge:
 
-    - ``MultiOutput`` (a prior subgraph's or fallback's result) already carries
-      ``generic_layout``, so it complies by construction.
+    - An intermediate ``ComputedBuffer`` is graph-internal and freely
+      restickifiable.
+    - A ``MultiOutput`` (a prior subgraph's or fallback's result) is too: in a
+      stacked region it is layer N's result feeding layer N+1, and when its layout
+      differs from the boundary it has to be copied like any other operand.
+      ``_create_restickify_node`` builds such a copy from the buffer itself, since
+      the ``getitem`` node that selects a result is never in ``graph.env``.
     - A graph input's STL is the caller's fact, not a compiler choice (the
       optimizer commits its single candidate verbatim), and restickifying one
       raises buffer-ownership questions at the graph boundary. Deliberately out of
       scope; ``_subgraph_input_stls`` still raises if such an operand disagrees.
-    - An intermediate ``ComputedBuffer`` is graph-internal and freely
-      restickifiable -- these are the edges returned here.
     """
     args: list[PropArg] = []
     for operand in op.inputs or []:
@@ -2780,7 +2783,7 @@ def _subgraph_operand_args(op) -> list[PropArg]:
         if not name:
             continue
         buf = V.graph.try_get_buffer(name)
-        if not isinstance(buf, ComputedBuffer):
+        if not isinstance(buf, (ComputedBuffer, MultiOutput)):
             continue
         layout = buf.maybe_get_layout()
         if not isinstance(layout, FixedLayout) or layout.device.type != DEVICE_NAME:
