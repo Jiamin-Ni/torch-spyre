@@ -62,6 +62,8 @@ from torch.compiler import nested_compile_region
 import torch_spyre._inductor.passes as _passes
 import torch_spyre._inductor.wsr.propagate_named_dims as _pnd
 from torch_spyre._C import SpyreTensorLayout
+from torch_spyre._inductor.nonstick_dim_order import reorder_nonstick_dims
+from torch_spyre._inductor.optimize_restickify import beam_global_min_cost
 from torch_spyre._inductor.propagate_layouts import propagate_spyre_tensor_layouts
 from utils_inductor import _compile_and_run, mock_backend_compiler
 
@@ -642,4 +644,114 @@ def test_subgraph_body_reseeds_from_parent_operands_discarding_injection():
     assert not diffs, (
         "the body's layouts changed even though its seed was reset to the "
         "original value, so the re-run is not deterministic:\n" + "\n".join(diffs)
+    )
+
+
+@nested_compile_region
+def _mutating_region(cache, h, w):
+    # The in-place update makes the region auto-functionalized, and gives the
+    # body an output with more than one candidate layout -- the case a real model
+    # hits and the one an output choice actually has to be made for.
+    cache.add_(1.0)
+    return torch.relu(h @ w) + cache
+
+
+def _mutating_caller(h, w, cache):
+    for _ in range(2):
+        h = _mutating_region(cache, h, w)
+    return h
+
+
+def _front(graph):
+    """Re-run the front of the layout pipeline, as the real pipeline orders it."""
+    saved = dict(_pnd._named_dims)
+    try:
+        propagate_spyre_tensor_layouts(graph)
+        reorder_nonstick_dims(graph)
+    finally:
+        _pnd._named_dims.clear()
+        _pnd._named_dims.update(saved)
+
+
+def test_body_cost_per_forced_output_layout():
+    """A body can be priced per result layout by re-running its front + beam.
+
+    Choosing a subgraph's result layout in the PARENT needs, for each candidate
+    O, what the body pays to produce it. That is obtained by re-running the
+    body's propagate -> reorder_nonstick_dims, narrowing its output op to [O],
+    and running the beam (whose best cost beam_global_min_cost returns). This
+    pins that each step behaves:
+
+    - propagate + reorder_nonstick_dims is idempotent on the body (the earlier
+      tests cover propagate alone; reorder rewrites buf.layouts[:] in place);
+    - forcing different O gives different costs, and the unconstrained beam's
+      cost is the cheapest forced one;
+    - restoring the front leaves the body exactly as it was, so the real run
+      that follows is unaffected.
+    """
+    captured: dict = {}
+    real_reorder = _passes.reorder_nonstick_dims
+
+    def hook(graph):
+        real_reorder(graph)
+        if getattr(graph, "parent", None) is None:
+            return
+        base = _snapshot_layouts(graph)
+        _front(graph)
+        captured["idempotent_diffs"] = _diff(base, _snapshot_layouts(graph))
+
+        outputs = set(graph.get_output_names())
+        out_op = next(
+            op
+            for op in graph.operations
+            if op.maybe_get_name() in outputs and getattr(op, "layouts", None)
+        )
+        candidates = list(out_op.layouts)
+        captured["n_candidates"] = len(candidates)
+        captured["free"] = beam_global_min_cost(graph.operations)
+        forced = []
+        for cand in candidates:
+            _front(graph)
+            out_op.layouts[:] = [cand]
+            forced.append(beam_global_min_cost(graph.operations))
+        captured["forced"] = forced
+        _front(graph)
+        captured["restore_diffs"] = _diff(base, _snapshot_layouts(graph))
+
+    h = torch.randn(8, 64, 128, dtype=torch.float16, device=DEVICE)
+    w = torch.randn(128, 128, dtype=torch.float16, device=DEVICE)
+    cache = torch.zeros(8, 64, 128, dtype=torch.float16, device=DEVICE)
+    with (
+        patch.object(_passes, "reorder_nonstick_dims", hook),
+        t_inductor_config.patch("fx_graph_cache", False),
+        patch("torch_spyre.execution.kernel_runner.prepare_kernel"),
+        patch("torch_spyre.execution.kernel_runner.launch_jobplan"),
+        mock_backend_compiler(),
+    ):
+        torch._dynamo.reset()
+        try:
+            torch.compile(_mutating_caller, dynamic=False, fullgraph=True)(h, w, cache)
+        finally:
+            torch._dynamo.reset()
+
+    assert "forced" in captured, "no invoke_subgraph body reached the hook"
+    assert captured["n_candidates"] > 1, (
+        "the body's output had a single candidate, so no output choice was "
+        "exercised; adjust the fixture"
+    )
+    assert not captured["idempotent_diffs"], (
+        "propagate + reorder_nonstick_dims is not idempotent on the body:\n"
+        + "\n".join(captured["idempotent_diffs"])
+    )
+    assert len(set(captured["forced"])) > 1, (
+        f"every forced output layout cost the same {captured['forced']}, so the "
+        "body cost does not distinguish result layouts"
+    )
+    assert captured["free"] == min(captured["forced"]), (
+        f"unconstrained cost {captured['free']} is not the cheapest forced "
+        f"cost {captured['forced']}"
+    )
+    assert not captured["restore_diffs"], (
+        "re-running the front did not restore the body:\n"
+        + "\n".join(captured["restore_diffs"])
     )

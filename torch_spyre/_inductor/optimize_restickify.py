@@ -693,8 +693,12 @@ def _compute_last_use(operations: list, step_of: "dict[str, int]") -> "dict[str,
     return last_use
 
 
-def beam_global_min_cost(operations: list) -> None:
+def beam_global_min_cost(operations: list) -> float:
     """Global beam search layout selection.
+
+    Returns the total restickify cost of the committed assignment, so a caller
+    can compare alternatives -- e.g. the cost of an invoke_subgraph body under a
+    given operand and result layout.
 
     Processes ops in topological order. For each op with a restick_cost_fn,
     expands every current state by branching over candidate output STLs and
@@ -856,6 +860,7 @@ def beam_global_min_cost(operations: list) -> None:
     for name, stl in zip(frontier.buf_names, best.assignments):
         op = V.graph.get_buffer(name)
         op.committed_stl = stl
+    return best.cost
 
 
 def optimize_restickify_locations(graph: GraphLowering) -> None:
