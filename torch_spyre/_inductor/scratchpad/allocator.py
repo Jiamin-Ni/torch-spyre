@@ -29,6 +29,7 @@ from torch._inductor.ir import (
     ComputedBuffer,
     ExternKernel,
     FallbackKernel,
+    InvokeSubgraph,
     MutationLayoutSHOULDREMOVE,
     Operation,
     Pointwise,
@@ -227,6 +228,28 @@ def _multi_output_extern_kernel_in_live_range(
         if outputs is not None and len(outputs) > 1:
             return True
     return False
+
+
+def _invoke_subgraph_in_live_range(graph: GraphLowering, uses: list[int]) -> bool:
+    """True if an ``invoke_subgraph`` call runs while the buffer is live.
+
+    A subgraph body is compiled and LX-planned as its own graph, so its kernels
+    reuse the same LX offsets as the parent's; a resident buffer straddling the
+    call is silently overwritten. ``LxContextSwitchingPass`` brackets only
+    ``FallbackKernel``s -- ``InvokeSubgraph`` is an ``ExternKernel`` but not a
+    ``FallbackKernel`` -- so, like the multi-output case, nothing dumps and
+    restores around it, and this check runs unconditionally.
+
+    Seen on Granite's split block: the embedding output was left in LX across the
+    pre-attention region's call, and the attention-tail region's operand copy,
+    scheduled after it, read the region's scratchpad instead.
+    """
+    if not uses:
+        return False
+    return any(
+        isinstance(graph.operations[i], InvokeSubgraph)
+        for i in range(min(uses), max(uses) + 1)
+    )
 
 
 def _is_carried_reduction_storage(op: Any) -> bool:
@@ -654,6 +677,10 @@ class ScratchpadAllocator:
             _multi_output_extern_kernel_in_live_range(graph, uses)
         ):
             return "live across multi-output extern kernel"
+        # Unconditional for the same reason: LxContextSwitchingPass does not
+        # bracket InvokeSubgraph (see _invoke_subgraph_in_live_range).
+        if _invoke_subgraph_in_live_range(graph, uses):
+            return "live across invoke_subgraph"
         if self._is_index_or_indirectly_accessed(graph, name, uses, op):
             # Index tensors and the value tensors they index into are read via
             # data-dependent (indirect) addressing, must stay in hbm.
@@ -726,6 +753,9 @@ class ScratchpadAllocator:
             graph, uses
         ):
             return "extern kernel user or live across extern kernel"
+        # See the matching check in _buffer_residency_reason.
+        if _invoke_subgraph_in_live_range(graph, uses):
+            return "live across invoke_subgraph"
         if not GraphEditor.all_uses_are_rewritable(graph, uses):
             return "use is not rewritable to the clone"
         if buffer_not_read_in_full(graph, name):

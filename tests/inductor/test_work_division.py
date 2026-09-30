@@ -27,6 +27,7 @@ from torch._inductor.ir import (
     ComputedBuffer,
     FixedLayout,
     FlexibleLayout,
+    InvokeSubgraph,
     Pointwise,
     Reduction,
 )
@@ -184,6 +185,9 @@ class TestLoopCarryLxEligibility(unittest.TestCase):
                 return_value=False,
             ),
             patch.object(
+                allocator_module, "_invoke_subgraph_in_live_range", return_value=False
+            ),
+            patch.object(
                 allocator_module, "buffer_not_read_in_full", return_value=False
             ),
             patch.object(
@@ -249,6 +253,9 @@ class TestRestickifyBarrierDeferredOnJointPath(unittest.TestCase):
                 return_value=False,
             ),
             patch.object(
+                allocator_module, "_invoke_subgraph_in_live_range", return_value=False
+            ),
+            patch.object(
                 self.allocator, "_is_index_or_indirectly_accessed", return_value=False
             ),
             patch.object(
@@ -277,6 +284,99 @@ class TestRestickifyBarrierDeferredOnJointPath(unittest.TestCase):
                 "read by restickify (local-read proof failed)",
             )
             barrier.assert_called_once()
+
+
+class TestInvokeSubgraphLxResidency(unittest.TestCase):
+    """A buffer live across an ``invoke_subgraph`` call must not stay in LX.
+
+    The subgraph body is LX-planned independently and reuses the parent's
+    offsets, and ``LxContextSwitchingPass`` brackets only ``FallbackKernel``s,
+    so nothing protects a resident buffer across the call. Refused even with
+    context switching on (its default), unlike the generic extern-kernel guard.
+    """
+
+    def setUp(self):
+        self.hop = MagicMock(spec=InvokeSubgraph)
+        producer = _computed_buffer((64, 64), name="buf")
+        consumer = _computed_buffer((64, 64), name="consumer")
+        # producer (0) -> invoke_subgraph (1) -> consumer (2)
+        self.graph = SimpleNamespace(
+            operations=[producer, self.hop, consumer],
+            try_get_buffer=lambda _name: None,
+        )
+        self.op = producer
+
+    def test_helper_detects_only_a_straddling_call(self):
+        crosses = allocator_module._invoke_subgraph_in_live_range
+        self.assertTrue(crosses(self.graph, [0, 2]))
+        self.assertTrue(crosses(self.graph, [1]))  # operand of the call
+        self.assertFalse(crosses(self.graph, [2]))
+        self.assertFalse(crosses(self.graph, []))
+
+    def _passing_checks(self, allocator):
+        """Patch every check that runs before the invoke_subgraph one to pass."""
+        stack = ExitStack()
+        stack.enter_context(
+            patch.object(allocator_module.config, "enable_lx_context_switching", True)
+        )
+        stack.enter_context(
+            patch.object(allocator, "_op_output_good_for_lx_reuse", return_value=True)
+        )
+        stack.enter_context(
+            patch.object(allocator_module, "is_empty_tiled_layout", return_value=False)
+        )
+        stack.enter_context(
+            patch.object(allocator_module, "_is_tiled_advancing", return_value=False)
+        )
+        stack.enter_context(
+            patch.object(
+                allocator_module, "_is_read_advancing_anywhere", return_value=False
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                allocator_module,
+                "_multi_output_extern_kernel_in_live_range",
+                return_value=False,
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                allocator_module, "clone_at_graph_boundaries", return_value=True
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                allocator, "_is_index_or_indirectly_accessed", return_value=False
+            )
+        )
+        return stack
+
+    def test_intermediate_straddling_call_is_refused(self):
+        allocator = CoOptimizingAllocator(lambda buffers, size: None, 2**20)
+        with self._passing_checks(allocator):
+            reason = allocator._buffer_residency_reason(
+                self.graph,
+                "buf",
+                [0, 2],
+                self.op,
+                mutated_buffers=set(),
+                graph_output_names=set(),
+                reinterpret_output_names=set(),
+                ncores={},
+                ncores_reasons={},
+                division_is_fixed=False,
+                buf_user_deps={},
+            )
+        self.assertEqual(reason, "live across invoke_subgraph")
+
+    def test_graph_input_straddling_call_is_refused(self):
+        allocator = ScratchpadAllocator(GreedyLayoutSolver, 2**20)
+        with self._passing_checks(allocator):
+            reason = allocator._input_residency_reason(
+                self.graph, "arg0_1", [0, 2], division_is_fixed=False
+            )
+        self.assertEqual(reason, "live across invoke_subgraph")
 
 
 class TestEmptyLxEligibility(unittest.TestCase):
