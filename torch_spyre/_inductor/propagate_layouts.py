@@ -100,7 +100,13 @@ from .pass_utils import (
     origin_in_graph,
     rescale_stl_for_dtype,
 )
-from .optimize_restickify import AllSameNode, AnyInNode, FixedInOutNode
+from .optimize_restickify import (
+    AllSameNode,
+    AnyInNode,
+    EdgeCostMap,
+    ExitCostNode,
+    FixedInOutNode,
+)
 from .views import compute_coordinates, matching_dim
 
 # ---------------------------------------------------------------------------
@@ -2956,15 +2962,12 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
     ``MultiOutput`` whose position cannot be determined -- since this is a safety
     net, not a new requirement.
     """
-    parent = getattr(graph, "parent", None)
-    if parent is None:
+    required = subgraph_required_output_layouts(graph)
+    if not required:
         return
 
     # Indexable, not a set: position i of this list is body output i.
     output_names = list(graph.get_output_names())
-    if not output_names:
-        return
-
     by_name: dict = {}
     candidates_by_name: dict = {}
     for op in graph.operations:
@@ -2981,6 +2984,61 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
         return
     body_stls = [by_name.get(name) for name in output_names]
 
+    for idx, declared_list in required.items():
+        if not (0 <= idx < len(body_stls)) or body_stls[idx] is None:
+            continue
+        body_stl = body_stls[idx]
+        for mo_name, declared in declared_list:
+            declared_stl = declared.device_layout
+            if body_stl == declared_stl:
+                continue
+            # Was the declared layout even available to the body's beam? The two
+            # cases want different fixes, so name which one this is.
+            cands = candidates_by_name.get(output_names[idx]) or []
+            reachable = any(c == declared_stl for c in cands)
+            if cands:
+                diagnosis = (
+                    f"the body HAD that layout among its {len(cands)} candidates "
+                    f"and its own optimizer chose otherwise"
+                    if reachable
+                    else f"that layout was NOT among the body's {len(cands)} "
+                    f"candidates {[list(c.device_size) for c in cands]}"
+                )
+            else:
+                diagnosis = "the body's candidate layouts were not recorded"
+            raise Unsupported(
+                f"invoke_subgraph body {graph.name!r} produces output "
+                f"{output_names[idx]} (position {idx}) with device layout "
+                f"{list(body_stl.device_size)}/"
+                f"{list(body_stl.stride_map)}, but the parent committed "
+                f"{list(declared_stl.device_size)}/"
+                f"{list(declared_stl.stride_map)} for {mo_name} and its "
+                f"consumers to that, and the output could not be conformed "
+                f"(finalize_layouts plans a copy only for a plain computed value "
+                f"whose copy is feasible and whose call sites agree -- not a "
+                f"graph-input passthrough or a mutation target). "
+                f"Diagnosis: {diagnosis}"
+            )
+
+
+def subgraph_required_output_layouts(graph: GraphLowering) -> dict:
+    """The layout the parent committed for each of a subgraph body's outputs.
+
+    A body's result is selected in the parent by one ``MultiOutput`` per output
+    position at each call site, and the parent commits each of those to a layout
+    -- today always ``generic_layout``. By the time the body itself is lowered
+    the parent is finalized (the body's pipeline runs during parent codegen), so
+    those commitments are facts the body can meet.
+
+    Returns ``{position: [(multi_output_name, FixedTiledLayout), ...]}`` -- one
+    entry per call site -- or ``{}`` for a graph that is not an invoke_subgraph
+    body. Positions whose ``MultiOutput`` is not committed, or whose index is not
+    an integer, are omitted.
+    """
+    parent = getattr(graph, "parent", None)
+    if parent is None:
+        return {}
+    required: dict = {}
     for hop in parent.operations:
         if not isinstance(hop, InvokeSubgraph):
             continue
@@ -3000,43 +3058,10 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
             if not isinstance(declared, FixedTiledLayout):
                 continue
             idx = _multi_output_index(mo)
-            if idx is None or not (0 <= idx < len(body_stls)):
+            if idx is None:
                 continue
-            body_stl = body_stls[idx]
-            if body_stl is None:
-                continue
-            declared_stl = declared.device_layout
-            if body_stl == declared_stl:
-                continue
-            # Was the declared layout even available to the body's beam? The two
-            # cases want different fixes, so name which one this is.
-            cands = candidates_by_name.get(output_names[idx]) or []
-            reachable = any(c == declared_stl for c in cands)
-            if cands:
-                diagnosis = (
-                    f"the body HAD that layout among its {len(cands)} candidates "
-                    f"and its own optimizer chose otherwise, so the body needs to "
-                    f"be constrained to the boundary layout"
-                    if reachable
-                    else f"that layout was NOT among the body's {len(cands)} "
-                    f"candidates {[list(c.device_size) for c in cands]}, so the "
-                    f"body cannot produce it and the parent's declaration is "
-                    f"the thing that has to change"
-                )
-            else:
-                diagnosis = "the body's candidate layouts were not recorded"
-            raise Unsupported(
-                f"invoke_subgraph body {graph.name!r} produces output "
-                f"{output_names[idx]} (position {idx}) with device layout "
-                f"{list(body_stl.device_size)}/"
-                f"{list(body_stl.stride_map)}, but the parent declared "
-                f"{list(declared_stl.device_size)}/"
-                f"{list(declared_stl.stride_map)} for {mo.get_name()} and "
-                f"already committed its consumers to that; the subgraph "
-                f"result layout is declared (generic_layout) rather than "
-                f"derived from the body, so a body that commits a different "
-                f"orientation cannot be served. Diagnosis: {diagnosis}"
-            )
+            required.setdefault(idx, []).append((mo.get_name(), declared))
+    return required
 
 
 def propagate_spyre_tensor_layouts(
@@ -3525,13 +3550,54 @@ def propagate_spyre_tensor_layouts(
     # enforcement problem -- constrain the body) from the layout never being
     # available at all (a real incompatibility).
     if getattr(graph, "parent", None) is not None:
-        output_names = set(graph.get_output_names())
+        output_names = list(graph.get_output_names())
+        required = subgraph_required_output_layouts(graph)
         for op in operations:
             name = op.maybe_get_name()
-            if name in output_names:
-                layouts = getattr(op, "layouts", None)
-                if layouts:
-                    op._subgraph_output_candidates = list(layouts)  # type: ignore[attr-defined]
+            if name not in output_names:
+                continue
+            layouts = getattr(op, "layouts", None)
+            if not layouts:
+                continue
+            op._subgraph_output_candidates = list(layouts)  # type: ignore[attr-defined]
+            # Price the parent's commitment into the body's own beam: each
+            # candidate also costs the restickify from it to the required layout
+            # (zero when it already is that layout). The beam then chooses between
+            # producing the required layout directly and producing a cheaper one
+            # and copying the result at the end; when it chooses the copy,
+            # finalize_layouts plans it and insert_restickify makes it.
+            targets = {
+                declared.device_layout
+                for _, declared in required.get(output_names.index(name), [])
+            }
+            if len(targets) != 1:
+                # No single requirement (call sites disagree); the validator
+                # reports it.
+                continue
+            cost_fn = getattr(op, "restick_cost_fn", None)
+            if cost_fn is None:
+                continue
+            (target,) = targets
+            write_dep = next(iter(op.get_read_writes().writes), None)
+            if not isinstance(write_dep, MemoryDep):
+                continue
+            exit_edge = EdgeCostMap(
+                write_dep,
+                list(layouts),
+                [target],
+                write_dep,
+                None,
+                require_exact=True,
+            )
+            op.restick_cost_fn = ExitCostNode(cost_fn, exit_edge, target)
+            logger.debug(
+                "%s: output %s must leave as %s; exit cost added to its %d "
+                "candidate(s)",
+                graph.name,
+                name,
+                list(target.device_size),
+                len(layouts),
+            )
 
 
 def _real_layout_matches_op_size(

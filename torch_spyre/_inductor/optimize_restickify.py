@@ -408,6 +408,56 @@ class AnyInNode(RestickNodeCost):
         return 0.0
 
 
+class ExitCostNode(RestickNodeCost):
+    """Adds the cost of copying an op's OUTPUT to a required layout.
+
+    For an op whose result has to leave its graph in a fixed layout -- an
+    invoke_subgraph body output, which must match what the parent committed for
+    the result -- but where the op is free to compute in any of its candidates.
+    Each candidate costs what the wrapped node charges plus the restickify from
+    that candidate to the required layout (zero when they match). So the beam
+    weighs producing the required layout directly, including any restickifies
+    upstream that takes, against producing a cheaper layout and copying the result
+    once at the end -- instead of forcing either.
+
+    Only the cost changes. Inputs, the restickifies planned on them, and the lower
+    bounds all come from the wrapped node: the exit cost does not belong to any
+    input edge, so folding it into ``min_input_cost`` would count it once per
+    input and overestimate. The copy itself, when the beam chooses one, is
+    planned by finalize_layouts and made by insert_restickify.
+    """
+
+    def __init__(self, inner: RestickNodeCost, exit_edge: EdgeCostMap, required):
+        super().__init__(inner.edge_costs)
+        self._inner = inner
+        self._exit_edge = exit_edge
+        self._required = required
+
+    def cost(
+        self, in_layouts: "list[SpyreTensorLayout]", out_stl: "SpyreTensorLayout"
+    ) -> float:
+        inner_cost = self._inner.cost(in_layouts, out_stl)
+        if inner_cost == INF:
+            return INF
+        exit_cost = self._exit_edge.cost(out_stl, self._required)
+        if exit_cost == INF:
+            # The copy cannot be made at all (e.g. ReStickifyOpHBM handles only
+            # the FP16 device format). Charging INF would make every candidate but
+            # the required one infeasible and fail a compile that works today;
+            # charge nothing and leave the mismatch to the validator's report.
+            exit_cost = 0.0
+        return inner_cost + exit_cost
+
+    def required_input_stls(self, out_stl):
+        return self._inner.required_input_stls(out_stl)
+
+    def min_input_cost(self, dep_name, in_stl, out_stl):
+        return self._inner.min_input_cost(dep_name, in_stl, out_stl)
+
+    def first_blocking_edge(self, out_stl: "SpyreTensorLayout") -> "EdgeCostMap | None":
+        return self._inner.first_blocking_edge(out_stl)
+
+
 def _stick_incompatibility_reason(
     in_stick: "sympy.Expr",
     out_stick: "sympy.Expr",

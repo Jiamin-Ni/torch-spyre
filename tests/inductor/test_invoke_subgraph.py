@@ -699,5 +699,130 @@ class TestSubgraphResultOperandRestickify(_RegionTestCase):
         )
 
 
+class TestSubgraphOutputConformance(_RegionTestCase):
+    """A subgraph body returns the result layout its parent committed.
+
+    The parent commits each result's MultiOutput -- and compiles its consumers --
+    before the body is laid out, so the body has to meet that layout. Its output
+    op's candidates are priced with an exit cost (ExitCostNode): the restickify
+    from each candidate to the required layout. When the required layout is a free
+    candidate the beam simply picks it; when the body cannot produce it, the body
+    commits another layout, finalize_layouts plans a copy of the output, and
+    insert_restickify makes it and has the body return the copy instead.
+
+    Uses a mutating (auto-functionalized) region: its body output has two
+    candidates, the same shape of problem a real model hits.
+    """
+
+    @staticmethod
+    def _inputs():
+        torch.manual_seed(0)
+        h = torch.randn(8, 64, 128, dtype=torch.float16) * 0.1
+        w = torch.randn(128, 128, dtype=torch.float16) * 0.05
+        cache = torch.zeros(8, 64, 128, dtype=torch.float16)
+        return h, w, cache
+
+    @staticmethod
+    def _reference(h, w, cache):
+        c = cache.float().clone()
+        out = h.float()
+        for _ in range(2):
+            c.add_(1.0)
+            out = torch.relu(out * 2.0 + out @ w.float()) + c
+        return out
+
+    def _run(self, make_body_unable):
+        from unittest.mock import patch
+
+        import torch_spyre._inductor.insert_restickify as _ir
+        import torch_spyre._inductor.passes as _passes
+        from torch_spyre._inductor.propagate_layouts import (
+            subgraph_required_output_layouts,
+        )
+
+        @nested_compile_region
+        def region(cache, h, w):
+            cache.add_(1.0)
+            return torch.relu(h * 2.0 + h @ w) + cache
+
+        def outer(h, w, cache):
+            for _ in range(2):
+                h = region(cache, h, w)
+            return h
+
+        removed = []
+        real_propagate = _passes.propagate_spyre_tensor_layouts
+
+        def propagate(graph):
+            real_propagate(graph)
+            if not make_body_unable or getattr(graph, "parent", None) is None:
+                return
+            # Take the required layout away from the body output's candidates, so
+            # the body cannot produce it and a copy is the only way to comply.
+            required = subgraph_required_output_layouts(graph)
+            names = list(graph.get_output_names())
+            for op in graph.operations:
+                name = op.maybe_get_name()
+                layouts = getattr(op, "layouts", None)
+                if name not in names or not layouts:
+                    continue
+                want = {d.device_layout for _, d in required.get(names.index(name), [])}
+                kept = [c for c in layouts if c not in want]
+                if kept and len(kept) < len(layouts):
+                    op.layouts[:] = kept
+                    removed.append(name)
+
+        copies = []
+        real_create = _ir._create_restickify_node
+
+        def create(info, op):
+            result = real_create(info, op)
+            copies.append(info.arg_name)
+            return result
+
+        body_outputs = []
+        real_insert_outputs = _ir._insert_subgraph_output_restickifies
+
+        def insert_outputs(graph, plan):
+            before = len(copies)
+            real_insert_outputs(graph, plan)
+            if getattr(graph, "parent", None) is not None:
+                body_outputs.append((list(graph.get_output_names()), copies[before:]))
+
+        h, w, cache = self._inputs()
+        seen_hops = []
+        with (
+            patch.object(_passes, "propagate_spyre_tensor_layouts", propagate),
+            patch.object(_ir, "_create_restickify_node", create),
+            patch.object(_ir, "_insert_subgraph_output_restickifies", insert_outputs),
+        ):
+            compiled = self._compile_counting_hops(outer, seen_hops)
+            out = (
+                compiled(h.to(DEVICE_NAME), w.to(DEVICE_NAME), cache.to(DEVICE_NAME))
+                .cpu()
+                .float()
+            )
+        self._assert_regions_not_inlined(seen_hops, expected=2)
+        return out, removed, body_outputs, self._reference(h, w, cache)
+
+    def test_required_layout_unavailable_body_returns_copy(self):
+        out, removed, body_outputs, ref = self._run(make_body_unable=True)
+        self.assertTrue(removed, "the required layout was never a candidate to remove")
+        self.assertTrue(body_outputs, "no output restickify step ran on a body")
+        names, copied = body_outputs[0]
+        self.assertEqual(
+            len(copied), 1, f"expected one output copy, got {copied} (outputs {names})"
+        )
+        self.assertNotIn(copied[0], names, "the body still returns the uncopied buffer")
+        torch.testing.assert_close(out, ref, atol=0.05, rtol=0.05)
+
+    def test_required_layout_free_body_makes_no_copy(self):
+        out, removed, body_outputs, ref = self._run(make_body_unable=False)
+        self.assertTrue(body_outputs, "no output restickify step ran on a body")
+        _, copied = body_outputs[0]
+        self.assertEqual(copied, [], "a copy was made although the layout was free")
+        torch.testing.assert_close(out, ref, atol=0.05, rtol=0.05)
+
+
 if __name__ == "__main__":
     unittest.main()

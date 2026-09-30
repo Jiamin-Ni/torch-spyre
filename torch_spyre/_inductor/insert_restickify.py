@@ -606,11 +606,124 @@ def insert_restickify_on_subgraph_operands(
         )
 
 
+def _plan_subgraph_output_restickifies(
+    graph: GraphLowering,
+) -> "dict[int, RestickifyArgInfo]":
+    """Decide which invoke_subgraph body outputs must be copied, and to what.
+
+    Called from ``finalize_layouts``, which decides every other restickify; the
+    copies are made later by ``insert_restickify`` like the rest of the plan.
+
+    The parent commits each subgraph result's ``MultiOutput`` to a layout, and
+    compiles its consumers against it, before the body is laid out at all (the
+    body's pipeline only runs during parent codegen). The body's beam has already
+    priced meeting that layout -- its output ops carry an ``ExitCostNode`` -- and
+    either committed it or chose a cheaper layout plus one copy at the end. This
+    records that copy, keyed by output position.
+
+    Only a plain computed value is planned. An output that is a graph-input
+    passthrough or a mutation target, one whose call sites disagree about the
+    required layout, or one whose copy is infeasible is left unplanned, and
+    ``validate_subgraph_output_layouts`` reports it.
+
+    Returns ``{}`` for a graph that is not an invoke_subgraph body.
+    """
+    from .pass_utils import compute_restickify_needed
+    from .propagate_layouts import subgraph_required_output_layouts
+
+    required = subgraph_required_output_layouts(graph)
+    if not required:
+        return {}
+    output_names = list(graph.get_output_names())
+    plan: dict[int, RestickifyArgInfo] = {}
+    for idx, declared_list in sorted(required.items()):
+        if not (0 <= idx < len(output_names)):
+            continue
+        targets = {declared.device_layout for _, declared in declared_list}
+        if len(targets) != 1:
+            # Call sites disagree about this result; nothing single to copy to.
+            continue
+        (target,) = targets
+        name = output_names[idx]
+        buf = graph.try_get_buffer(name)
+        if not isinstance(buf, ComputedBuffer):
+            continue
+        have = buf.get_layout()
+        if not isinstance(have, FixedTiledLayout) or have.device_layout == target:
+            continue
+        if isinstance(buf.layout, MutationLayoutSHOULDREMOVE):
+            continue
+        if not isinstance(graph.graph_outputs[idx], (StorageBox, TensorBox)):
+            continue
+        # Ask the same question ExitCostNode's pricing asked, rather than
+        # restating its rules here (today: ReStickifyOpHBM lowers only the FP16
+        # device format).
+        write_dep = next(iter(buf.get_read_writes().writes), None)
+        if not isinstance(write_dep, MemoryDep):
+            continue
+        _, feasible_target = compute_restickify_needed(
+            have.device_layout,
+            have,
+            write_dep,
+            target,
+            write_dep,
+            None,
+            require_exact=True,
+        )
+        if feasible_target is None:
+            continue
+        plan[idx] = RestickifyArgInfo(
+            arg_name=name,
+            dep_index=None,
+            occurrence=0,
+            target_layout=FixedTiledLayout(
+                have.device, have.dtype, have.size, have.stride, target, have.offset
+            ),
+        )
+        logger.info(
+            "%s: output %d (%s) committed %s but the parent requires %s; "
+            "planning a restickified copy",
+            graph.name,
+            idx,
+            name,
+            list(have.device_layout.device_size),
+            list(target.device_size),
+        )
+    return plan
+
+
+def _insert_subgraph_output_restickifies(
+    graph: GraphLowering, plan: "dict[int, RestickifyArgInfo]"
+) -> None:
+    """Make the output copies planned by ``_plan_subgraph_output_restickifies``.
+
+    Each copy is built like any other restickify, then the body returns it
+    instead of the original by repointing its ``graph_outputs`` entry. This runs
+    inside the body's pre-scheduling pipeline, before its scheduler exists, so
+    the scheduler, ``get_output_names()`` and the wrapper all see the copy.
+    """
+    for idx, info in sorted(plan.items()):
+        entry = graph.graph_outputs[idx]
+        _, copy = _create_restickify_node(info, graph.get_buffer(info.arg_name))
+        new_entry = StorageBox(copy)
+        graph.graph_outputs[idx] = (
+            TensorBox(new_entry) if isinstance(entry, TensorBox) else new_entry
+        )
+        logger.info(
+            "%s: output %d now returns restickified copy %s of %s",
+            graph.name,
+            idx,
+            copy.get_name(),
+            info.arg_name,
+        )
+
+
 def insert_restickify(graph: GraphLowering) -> None:
     """Insert restickify operations before all nodes in restickify_plan.
 
     Consumes graph.restickify_plan (built by finalize_layouts) and splices the
-    necessary ComputedBuffer nodes into the operations list in-place.
+    necessary ComputedBuffer nodes into the operations list in-place; then makes
+    the invoke_subgraph body output copies in graph.output_restickify_plan.
     No scheduler state is touched.
     """
     if not hasattr(graph, "restickify_plan"):
@@ -632,6 +745,13 @@ def insert_restickify(graph: GraphLowering) -> None:
                 op, restickify_plan[op.get_name()], operations
             )
 
+    # Output copies for an invoke_subgraph body, keyed by output position rather
+    # than by a consumer op -- a graph output has none. After the consumer copies,
+    # so everything they read is already in place.
+    _insert_subgraph_output_restickifies(
+        graph, getattr(graph, "output_restickify_plan", {})
+    )
+
 
 def finalize_layouts(graph: GraphLowering) -> None:
     """Convert committed STLs (set by the optimizer) to FixedTiledLayouts and build
@@ -643,6 +763,9 @@ def finalize_layouts(graph: GraphLowering) -> None:
       committed_stl).
     - Schedule restickifies: for each input edge where the committed input STL is
       incompatible with what the op requires, record a restickify in the plan.
+    - For an invoke_subgraph body, record in graph.output_restickify_plan each
+      output that must be copied to the layout its parent committed for the
+      result (see _plan_subgraph_output_restickifies).
     """
     operations = graph.operations
     for name in graph.graph_input_names:
@@ -821,6 +944,7 @@ def finalize_layouts(graph: GraphLowering) -> None:
             )
 
     V.graph.restickify_plan = plan
+    V.graph.output_restickify_plan = _plan_subgraph_output_restickifies(V.graph)
     if logger.isEnabledFor(logging.DEBUG):
         if plan:
             lines = ["restickify plan:"]

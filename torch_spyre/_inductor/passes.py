@@ -549,13 +549,6 @@ class CustomPreSchedulingPasses:
             validate_ops,
             optimize_restickify_locations,
             finalize_layouts,
-            # Must follow finalize_layouts: it compares an invoke_subgraph body's
-            # COMMITTED output layout against the layout its parent declared, and
-            # the committed value does not exist until finalize_layouts folds the
-            # beam's choice into a FixedTiledLayout. Comparing candidates instead
-            # reports conflicts that never materialise -- a body's output commonly
-            # has several candidates and its beam picks the one the parent wanted.
-            validate_subgraph_output_layouts,
             # insert_restickify's advance-transfer logic (see its own
             # docstring) branches on whether old_name already has
             # `loop_info` stamped, to decide whether the per-trip advance
@@ -569,6 +562,11 @@ class CustomPreSchedulingPasses:
             # tiled_dims_per_read for a stage that is actually tiled -- a
             # wrong-answer, not a crash.
             insert_restickify,
+            # Must follow insert_restickify: for an invoke_subgraph body it
+            # compares the COMMITTED output layout the body actually returns --
+            # after any output copy finalize_layouts planned and insert_restickify
+            # made -- against the layout the parent committed for the result.
+            validate_subgraph_output_layouts,
             validate_no_restickify_on_mutation_targets,
             enforce_indirect_access_layout,
             insert_post_mutation_restickify,
