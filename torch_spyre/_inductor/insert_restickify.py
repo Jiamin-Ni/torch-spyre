@@ -523,10 +523,31 @@ def insert_restickify_on_node_inputs(
     object.__setattr__(op.data, "inner_fn", new_inner_fn)
 
 
+def _mutated_between(
+    arg_name: str,
+    copy_buf: ComputedBuffer,
+    consumer: Operation,
+    operations: list[Operation],
+) -> bool:
+    """Whether any op strictly between ``copy_buf`` and ``consumer`` mutates ``arg_name``.
+
+    A shared operand copy is a snapshot of its source taken where the copy sits in
+    ``operations``; a later consumer may reuse it only if the source is unchanged
+    in between.
+    """
+    start = operations.index(copy_buf)
+    end = operations.index(consumer)
+    return any(
+        arg_name in between.get_mutation_names()
+        for between in operations[start + 1 : end]
+    )
+
+
 def insert_restickify_on_subgraph_operands(
     op: InvokeSubgraph,
     resticks_needed: list[RestickifyArgInfo],
     operations: list[Operation],
+    shared_copies: "dict[tuple[str, SpyreTensorLayout], ComputedBuffer] | None" = None,
 ) -> None:
     """Insert restickify nodes before an InvokeSubgraph and repoint its operands.
 
@@ -551,7 +572,21 @@ def insert_restickify_on_subgraph_operands(
     here: ``InvokeSubgraph.create`` ran ``constrain_to_fake_tensor`` to force each
     operand to the subgraph placeholder's strides, and that constraint still
     holds. Asserted rather than assumed.
+
+    ``shared_copies`` maps (source name, target device layout) to its copy and is
+    shared across every InvokeSubgraph in the graph, so a source needed in the
+    same layout by several call sites is copied ONCE -- e.g. Granite's embedding
+    output, which is both the pre-attention region's input and the
+    attention-tail region's residual. Without it each site built its own
+    identical copy, and the later one, scheduled after the first region ran,
+    could not fuse with its LX-resident producer and read stale scratchpad.
+    Sharing is sound because an operand copy is a full, un-tiled copy (no
+    ``loop_info`` handoff, unlike the ComputedBuffer path) placed before its
+    first consumer; ``_mutated_between`` refuses reuse if the source changed in
+    between.
     """
+    if shared_copies is None:
+        shared_copies = {}
     try:
         op_index = operations.index(op)
     except ValueError:
@@ -563,7 +598,14 @@ def insert_restickify_on_subgraph_operands(
         arg_name = restick_arg_info.arg_name
         old_layout = V.graph.get_buffer(arg_name).get_layout()
 
-        _, restick_buff = _create_restickify_node(restick_arg_info, op)
+        key = (arg_name, restick_arg_info.target_layout.device_layout)
+        restick_buff = shared_copies.get(key)
+        reused = restick_buff is not None and not _mutated_between(
+            arg_name, restick_buff, op, operations
+        )
+        if not reused:
+            _, restick_buff = _create_restickify_node(restick_arg_info, op)
+            shared_copies[key] = restick_buff
         new_layout = restick_buff.get_layout()
         assert tuple(new_layout.size) == tuple(old_layout.size) and tuple(
             new_layout.stride
@@ -591,6 +633,16 @@ def insert_restickify_on_subgraph_operands(
             f"restickify planned for invoke_subgraph {op.get_name()} operand "
             f"{arg_name!r}, but no operand slot names that buffer"
         )
+
+        if reused:
+            # Already placed before an earlier consumer, hence before this one.
+            logger.info(
+                "invoke_subgraph %s operand %s reuses restickified copy %s",
+                op.get_name(),
+                arg_name,
+                restick_buff.get_name(),
+            )
+            continue
 
         # lower_restickify's realize() appended the node at the end; move it just
         # before the consumer to preserve topological order.
@@ -768,6 +820,9 @@ def insert_restickify(graph: GraphLowering) -> None:
         return
     restickify_plan: dict[str, list[RestickifyArgInfo]] = graph.restickify_plan
     operations = graph.operations
+    # Operand copies shared across every InvokeSubgraph in this graph; see
+    # insert_restickify_on_subgraph_operands.
+    shared_subgraph_copies: dict[tuple[str, SpyreTensorLayout], ComputedBuffer] = {}
 
     for op in list(
         operations
@@ -780,7 +835,10 @@ def insert_restickify(graph: GraphLowering) -> None:
             )
         elif isinstance(op, InvokeSubgraph):
             insert_restickify_on_subgraph_operands(
-                op, restickify_plan[op.get_name()], operations
+                op,
+                restickify_plan[op.get_name()],
+                operations,
+                shared_copies=shared_subgraph_copies,
             )
 
     # Output copies for an invoke_subgraph body, keyed by output position rather

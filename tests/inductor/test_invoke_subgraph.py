@@ -608,9 +608,9 @@ class TestSubgraphResultOperandRestickify(_RegionTestCase):
         events = []
         real_insert = _ir.insert_restickify_on_subgraph_operands
 
-        def recording_insert(op, resticks, operations):
+        def recording_insert(op, resticks, operations, **kwargs):
             before = [i.maybe_get_name() for i in op.inputs]
-            real_insert(op, resticks, operations)
+            real_insert(op, resticks, operations, **kwargs)
             after = [i.maybe_get_name() for i in op.inputs]
             names = [o.get_name() for o in operations]
             # Each repointed slot names the source before and its copy after.
@@ -900,6 +900,127 @@ class TestSubgraphToSubgraphResult(_RegionTestCase):
         self.assertTrue(lazy, "no subgraph result was left to its producer")
         self.assertTrue(declared, "every subgraph result was left undeclared")
         torch.testing.assert_close(out, ref, atol=0.02, rtol=0.02)
+
+
+class TestSharedSubgraphOperandRestickify(_RegionTestCase):
+    """One source feeding several call sites in the same layout is copied ONCE.
+
+    Mirrors Granite's split block (``nested_region_block_split`` in hf-adapters):
+    each layer calls a pre-attention region and an attention-tail region, and
+    BOTH take the layer's hidden state -- the second as its residual. For layer
+    0 that hidden state is the embedding output, which needs a boundary copy.
+
+    Each call site used to plan and build its own copy. The two copies were
+    identical, and the second one, scheduled after the first region ran, became
+    a standalone kernel reading its LX-resident producer's scratchpad address
+    with no HBM input: the residual was garbage. ``insert_restickify`` now shares
+    one copy per (source, target layout) across the graph's InvokeSubgraphs.
+
+    The boundary is forced (outer device axes swapped, as in
+    ``TestSubgraphResultOperandRestickify``) so every operand needs a copy and
+    the test doesn't depend on which layout the embedding happens to commit.
+    """
+
+    def test_source_shared_by_two_sites_is_copied_once(self):
+        from unittest.mock import patch
+
+        import torch_spyre._inductor.insert_restickify as _ir
+        import torch_spyre._inductor.propagate_layouts as _pl
+        from torch_spyre._C import SpyreTensorLayout
+
+        real_boundary = _pl._subgraph_boundary_stl
+
+        def swapped_boundary(buf):
+            stl = real_boundary(buf)
+            dev_size = list(stl.device_size)
+            stride_map = list(stl.stride_map)
+            dev_size[0], dev_size[1] = dev_size[1], dev_size[0]
+            stride_map[0], stride_map[1] = stride_map[1], stride_map[0]
+            return SpyreTensorLayout(
+                dev_size, stride_map, stl.device_dtype, stl.element_arrangement
+            )
+
+        @nested_compile_region
+        def pre_attn(h, weight):
+            return torch.relu(h @ weight)
+
+        @nested_compile_region
+        def attention_tail(h, q, weight):
+            return h + torch.relu(q @ weight)
+
+        num_layers = 2
+
+        def outer(tokens, wa, wb):
+            h = embed(tokens)
+            for _ in range(num_layers):
+                q = pre_attn(h, wa)
+                h = attention_tail(h, q, wb)
+            return h
+
+        torch.manual_seed(0)
+        embed = nn.Embedding(_VOCAB, 128).eval()
+        wa = torch.randn(128, 128, dtype=torch.float16) * 0.05
+        wb = torch.randn(128, 128, dtype=torch.float16) * 0.05
+        ids = torch.randint(0, _VOCAB, (8, 64))
+
+        # (hop, source, copy) for every repointed operand slot
+        events = []
+        real_insert = _ir.insert_restickify_on_subgraph_operands
+
+        def recording_insert(op, resticks, operations, **kwargs):
+            before = [i.maybe_get_name() for i in op.inputs]
+            real_insert(op, resticks, operations, **kwargs)
+            after = [i.maybe_get_name() for i in op.inputs]
+            names = [o.get_name() for o in operations]
+            for src, copy in zip(before, after):
+                if src != copy:
+                    # A shared copy must still precede every consumer.
+                    self.assertLess(
+                        names.index(copy),
+                        names.index(op.get_name()),
+                        f"{op.get_name()}: copy {copy} after its consumer",
+                    )
+                    events.append((op.get_name(), src, copy))
+
+        embed.to(device=DEVICE_NAME, dtype=torch.float16)
+        seen_hops = []
+        with (
+            patch.object(
+                _ir, "insert_restickify_on_subgraph_operands", recording_insert
+            ),
+            patch.object(_pl, "_subgraph_boundary_stl", swapped_boundary),
+        ):
+            compiled = self._compile_counting_hops(outer, seen_hops)
+            out = (
+                compiled(ids.to(DEVICE_NAME), wa.to(DEVICE_NAME), wb.to(DEVICE_NAME))
+                .cpu()
+                .float()
+            )
+        self._assert_regions_not_inlined(seen_hops, expected=2 * num_layers)
+
+        copies_by_src: dict[str, set[str]] = {}
+        hops_by_src: dict[str, set[str]] = {}
+        for hop, src, copy in events:
+            copies_by_src.setdefault(src, set()).add(copy)
+            hops_by_src.setdefault(src, set()).add(hop)
+        for src, copies in copies_by_src.items():
+            self.assertEqual(len(copies), 1, f"{src} copied more than once: {events}")
+        # Every layer's hidden state feeds both of that layer's call sites, so at
+        # least one source (the embedding, at minimum) is shared by two HOPs.
+        self.assertTrue(
+            any(len(hops) >= 2 for hops in hops_by_src.values()),
+            f"no source was shared across call sites: {events}",
+        )
+
+        ref_embed = nn.Embedding(_VOCAB, 128).eval()
+        ref_embed.load_state_dict(
+            {k: v.cpu().float() for k, v in embed.state_dict().items()}
+        )
+        h = ref_embed(ids)
+        for _ in range(num_layers):
+            q = torch.relu(h @ wa.float())
+            h = h + torch.relu(q @ wb.float())
+        torch.testing.assert_close(out, h, atol=0.05, rtol=0.05)
 
 
 if __name__ == "__main__":
