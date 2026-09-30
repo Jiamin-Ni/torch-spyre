@@ -824,5 +824,83 @@ class TestSubgraphOutputConformance(_RegionTestCase):
         torch.testing.assert_close(out, ref, atol=0.05, rtol=0.05)
 
 
+def _rope_like_view(x, freqs):
+    """The ending of hf_adapters' apply_rope_matmul, which a real model hits.
+
+    Computes in [B, L, H, D] order and returns ``out.transpose(1, 2)``: a
+    non-contiguous VIEW of a buffer stored sequence-outermost.
+    """
+    b, h, seq, d = x.shape
+    x_ = x.transpose(1, 2).reshape(b, seq, h, 2, d // 2)
+    sf = freqs[:, :, None, :, :, :]
+    out = sf.mul(x_.unsqueeze(-3)).sum(4, keepdim=True).flatten(3)
+    return out.transpose(1, 2)
+
+
+class TestSubgraphToSubgraphResult(_RegionTestCase):
+    """A result handed from one body to ANOTHER takes its producer's layout.
+
+    Region A returns a transposed view; region B consumes it. The parent never
+    computes with that result, so it declares no layout for it: A is lowered
+    first and its committed layout is published onto the parent's MultiOutput,
+    and B seeds its input from that. Declaring generic_layout instead fails --
+    generic_layout ignores the view's non-contiguous host strides, and the body
+    cannot copy a view into a layout that does not describe it.
+
+    The opposite result -- B's output feeding A, whose FIRST site takes a graph
+    input -- must stay declared: A is compiled at its first site, before B has
+    run, so its input position needs a fixed layout.
+    """
+
+    def test_view_result_between_bodies_matches_cpu(self):
+        from unittest.mock import patch
+
+        import torch_spyre._inductor.propagate_layouts as _pl
+
+        @nested_compile_region
+        def region_a(x, freqs):
+            return _rope_like_view(x * 1.0, freqs)
+
+        @nested_compile_region
+        def region_b(q, w):
+            return (q * 2.0) @ w
+
+        def outer(x, freqs, w):
+            for _ in range(2):
+                q = region_a(x, freqs)
+                x = region_b(q, w)
+            return x
+
+        torch.manual_seed(0)
+        x = torch.randn(1, 32, 512, 128, dtype=torch.float16) * 0.1
+        freqs = torch.randn(1, 512, 2, 2, 64, dtype=torch.float16) * 0.5
+        w = torch.randn(128, 128, dtype=torch.float16) * 0.05
+        ref = outer(x.float(), freqs.float(), w.float())
+
+        lazy, declared = [], []
+        real_classify = _pl._is_subgraph_to_subgraph_result
+
+        def classify(mo, operations):
+            result = real_classify(mo, operations)
+            (lazy if result else declared).append(mo.get_name())
+            return result
+
+        seen_hops = []
+        with patch.object(_pl, "_is_subgraph_to_subgraph_result", classify):
+            compiled = self._compile_counting_hops(outer, seen_hops)
+            out = (
+                compiled(x.to(DEVICE_NAME), freqs.to(DEVICE_NAME), w.to(DEVICE_NAME))
+                .cpu()
+                .float()
+            )
+
+        self._assert_regions_not_inlined(seen_hops, expected=4)
+        # A's results (to B) are left to A; B's results (to A, whose first site
+        # takes a graph input) stay declared.
+        self.assertTrue(lazy, "no subgraph result was left to its producer")
+        self.assertTrue(declared, "every subgraph result was left undeclared")
+        torch.testing.assert_close(out, ref, atol=0.02, rtol=0.02)
+
+
 if __name__ == "__main__":
     unittest.main()

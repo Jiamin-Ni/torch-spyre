@@ -3021,6 +3021,134 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
             )
 
 
+def _subgraph_producer(buf, operations):
+    """The InvokeSubgraph a MultiOutput ``buf`` selects from, else None."""
+    if not isinstance(buf, MultiOutput):
+        return None
+    names = {inp.maybe_get_name() for inp in (buf.inputs or [])}
+    for o in operations:
+        if isinstance(o, InvokeSubgraph) and o.get_name() in names:
+            return o
+    return None
+
+
+def _is_subgraph_to_subgraph_result(mo, operations) -> bool:
+    """Can ``mo`` be left undeclared, taking the layout its producer commits?
+
+    The parent never computes with such a result, only hands it from one body to
+    the next, and the producing body is lowered before the consuming one (parent
+    codegen runs in topological order). So its layout can simply be what the
+    producer commits -- provided every call site of the consumer agrees, since
+    the consumer body is compiled once:
+
+    - ``mo`` is produced by an InvokeSubgraph and is not a graph output;
+    - every reader is an InvokeSubgraph of a DIFFERENT body (a body chained to
+      itself is the stacked case, whose input must be fixed across its sites);
+    - at each reader's input position, EVERY call site of that consumer body is
+      fed by a result of the SAME producer body. A position fed at some site by
+      an intermediate or a graph input needs a fixed layout, and the consumer is
+      compiled at its first site -- possibly before a later producer has run.
+    """
+    producer = _subgraph_producer(mo, operations)
+    producer_body = producer.subgraph.graph if producer and producer.subgraph else None
+    if producer_body is None:
+        return False
+    name = mo.get_name()
+    if name in set(V.graph.get_output_names()):
+        return False
+
+    positions = []  # (consumer body, input index)
+    for o in operations:
+        if o is mo or o is producer or isinstance(o, MultiOutput):
+            continue
+        if isinstance(o, InvokeSubgraph):
+            body = o.subgraph.graph if o.subgraph else None
+            for j, inp in enumerate(o.inputs or []):
+                if inp.maybe_get_name() != name:
+                    continue
+                if body is None or body is producer_body:
+                    return False
+                positions.append((body, j))
+            continue
+        if name in {d.name for d in o.get_read_writes().reads}:
+            return False
+    if not positions:
+        return False
+
+    for body, j in positions:
+        for o in operations:
+            if not isinstance(o, InvokeSubgraph) or o.subgraph is None:
+                continue
+            if o.subgraph.graph is not body:
+                continue
+            operand = (o.inputs or [])[j] if j < len(o.inputs or []) else None
+            src = V.graph.try_get_buffer(
+                operand.maybe_get_name() or "" if operand is not None else ""
+            )
+            src_producer = _subgraph_producer(src, operations)
+            if src_producer is None or src_producer.subgraph is None:
+                return False
+            if src_producer.subgraph.graph is not producer_body:
+                return False
+    return True
+
+
+def publish_subgraph_result_layouts(graph: GraphLowering) -> None:
+    """Give undeclared subgraph results the layout this body actually returns.
+
+    For a result the parent left undeclared (``_is_subgraph_to_subgraph_result``),
+    set the parent MultiOutput's layout to a FixedTiledLayout carrying the device
+    layout this body committed for that output -- of the buffer itself, or of the
+    buffer a returned view reads. ``stride_map`` is in storage terms, so the same
+    device layout describes the view. The consuming body is lowered later and
+    seeds its input from it (``_subgraph_input_stls`` reads the MultiOutput's
+    FixedTiledLayout).
+    """
+    parent = getattr(graph, "parent", None)
+    if parent is None:
+        return
+    outputs = list(graph.graph_outputs)
+    for hop in parent.operations:
+        if not isinstance(hop, InvokeSubgraph):
+            continue
+        if hop.subgraph is None or hop.subgraph.graph is not graph:
+            continue
+        for mo in parent.operations:
+            if not isinstance(mo, MultiOutput):
+                continue
+            if not any(
+                inp.maybe_get_name() == hop.get_name() for inp in (mo.inputs or [])
+            ):
+                continue
+            if isinstance(mo.maybe_get_layout(), FixedTiledLayout):
+                continue
+            idx = _multi_output_index(mo)
+            if idx is None or not (0 <= idx < len(outputs)):
+                continue
+            entry = outputs[idx]
+            buf_name = entry.maybe_get_name()
+            buf = graph.try_get_buffer(buf_name or "")
+            committed = buf.maybe_get_layout() if buf is not None else None
+            if not isinstance(committed, FixedTiledLayout):
+                continue
+            host = mo.get_layout()
+            mo.layout = FixedTiledLayout(
+                host.device,
+                host.dtype,
+                host.size,
+                host.stride,
+                committed.device_layout,
+                host.offset,
+            )
+            logger.info(
+                "%s: %s takes the body's layout %s/%s",
+                graph.name,
+                mo.get_name(),
+                list(committed.device_layout.device_size),
+                list(committed.device_layout.stride_map),
+            )
+
+
 def subgraph_required_output_layouts(graph: GraphLowering) -> dict:
     """The layout the parent committed for each of a subgraph body's outputs.
 
@@ -3456,6 +3584,11 @@ def propagate_spyre_tensor_layouts(
             # The trailing MultiOutputs are handled in their own branch below.
             pass
         elif isinstance(op, MultiOutput):
+            if _is_subgraph_to_subgraph_result(op, operations):
+                # Its layout is whatever the producing body commits; it is filled
+                # in when that body is lowered (publish_subgraph_result_layouts),
+                # before the consuming body, which seeds from it.
+                continue
             op.layouts = [generic_layout(op)]
             op.restick_cost_fn = AnyInNode.from_args()
         elif isinstance(op, SpyreConstantFallback):

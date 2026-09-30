@@ -789,6 +789,9 @@ def insert_restickify(graph: GraphLowering) -> None:
     _insert_subgraph_output_restickifies(
         graph, getattr(graph, "output_restickify_plan", {})
     )
+    from .propagate_layouts import publish_subgraph_result_layouts
+
+    publish_subgraph_result_layouts(graph)
 
 
 def finalize_layouts(graph: GraphLowering) -> None:
