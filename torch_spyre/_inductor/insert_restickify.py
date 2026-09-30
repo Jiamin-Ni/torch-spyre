@@ -636,30 +636,59 @@ def _plan_subgraph_output_restickifies(
         return {}
     output_names = list(graph.get_output_names())
     plan: dict[int, RestickifyArgInfo] = {}
+    # Why each unplanned position was left alone, for the validator's message.
+    skipped: dict[int, str] = {}
+    graph.output_restickify_skips = skipped  # type: ignore[attr-defined]
     for idx, declared_list in sorted(required.items()):
         if not (0 <= idx < len(output_names)):
             continue
         targets = {declared.device_layout for _, declared in declared_list}
         if len(targets) != 1:
-            # Call sites disagree about this result; nothing single to copy to.
+            skipped[idx] = f"call sites disagree ({len(targets)} required layouts)"
             continue
         (target,) = targets
+        declared_host = declared_list[0][1]
         name = output_names[idx]
+        entry = graph.graph_outputs[idx]
         buf = graph.try_get_buffer(name)
         if not isinstance(buf, ComputedBuffer):
+            skipped[idx] = f"output buffer is a {type(buf).__name__}, not computed"
             continue
         have = buf.get_layout()
-        if not isinstance(have, FixedTiledLayout) or have.device_layout == target:
+        if not isinstance(have, FixedTiledLayout):
+            skipped[idx] = f"output layout is a {type(have).__name__}, not committed"
+            continue
+        if have.device_layout == target:
             continue
         if isinstance(buf.layout, MutationLayoutSHOULDREMOVE):
+            skipped[idx] = "output buffer is a mutation target"
             continue
-        if not isinstance(graph.graph_outputs[idx], (StorageBox, TensorBox)):
+        if not isinstance(entry, (StorageBox, TensorBox)):
+            skipped[idx] = (
+                f"the body returns a {type(entry).__name__} of {name}, not the "
+                f"buffer itself"
+            )
+            continue
+        if list(have.size) != list(declared_host.size) or list(have.stride) != list(
+            declared_host.stride
+        ):
+            # A restickify changes only the device layout, so it cannot bridge a
+            # difference in HOST layout -- and the two device layouts are then
+            # expressed against different host strides, so comparing them says
+            # nothing about whether one can be copied into the other.
+            skipped[idx] = (
+                f"host layouts differ: the body's {name} is "
+                f"{list(have.size)}/{list(have.stride)} but the parent's "
+                f"{declared_list[0][0]} is "
+                f"{list(declared_host.size)}/{list(declared_host.stride)}"
+            )
             continue
         # Ask the same question ExitCostNode's pricing asked, rather than
         # restating its rules here (today: ReStickifyOpHBM lowers only the FP16
         # device format).
         write_dep = next(iter(buf.get_read_writes().writes), None)
         if not isinstance(write_dep, MemoryDep):
+            skipped[idx] = "output op has no MemoryDep write"
             continue
         _, feasible_target = compute_restickify_needed(
             have.device_layout,
@@ -671,6 +700,7 @@ def _plan_subgraph_output_restickifies(
             require_exact=True,
         )
         if feasible_target is None:
+            skipped[idx] = "compute_restickify_needed reports the copy infeasible"
             continue
         plan[idx] = RestickifyArgInfo(
             arg_name=name,
@@ -689,6 +719,8 @@ def _plan_subgraph_output_restickifies(
             list(have.device_layout.device_size),
             list(target.device_size),
         )
+    for idx, reason in skipped.items():
+        logger.info("%s: not copying output %d: %s", graph.name, idx, reason)
     return plan
 
 

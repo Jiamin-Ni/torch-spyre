@@ -3006,6 +3006,9 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
                 )
             else:
                 diagnosis = "the body's candidate layouts were not recorded"
+            skip_reason = getattr(graph, "output_restickify_skips", {}).get(
+                idx, "finalize_layouts did not plan a copy for it"
+            )
             raise Unsupported(
                 f"invoke_subgraph body {graph.name!r} produces output "
                 f"{output_names[idx]} (position {idx}) with device layout "
@@ -3013,11 +3016,8 @@ def validate_subgraph_output_layouts(graph: GraphLowering) -> None:
                 f"{list(body_stl.stride_map)}, but the parent committed "
                 f"{list(declared_stl.device_size)}/"
                 f"{list(declared_stl.stride_map)} for {mo_name} and its "
-                f"consumers to that, and the output could not be conformed "
-                f"(finalize_layouts plans a copy only for a plain computed value "
-                f"whose copy is feasible and whose call sites agree -- not a "
-                f"graph-input passthrough or a mutation target). "
-                f"Diagnosis: {diagnosis}"
+                f"consumers to that, and the output could not be conformed: "
+                f"{skip_reason}. Diagnosis: {diagnosis}"
             )
 
 
