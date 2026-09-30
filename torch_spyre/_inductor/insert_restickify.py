@@ -664,9 +664,15 @@ def _plan_subgraph_output_restickifies(
             skipped[idx] = "output buffer is a mutation target"
             continue
         if not isinstance(entry, (StorageBox, TensorBox)):
+            try:
+                view = entry.get_layout()
+                view_desc = f" with layout {list(view.size)}/{list(view.stride)}"
+            except Exception:
+                view_desc = ""
             skipped[idx] = (
-                f"the body returns a {type(entry).__name__} of {name}, not the "
-                f"buffer itself"
+                f"the body returns a {type(entry).__name__}{view_desc} of {name}, "
+                f"whose own host layout is {list(have.size)}/{list(have.stride)}, "
+                f"not the buffer itself"
             )
             continue
         if list(have.size) != list(declared_host.size) or list(have.stride) != list(
