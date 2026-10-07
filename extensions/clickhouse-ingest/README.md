@@ -2,6 +2,10 @@
 
 The schema-v2 ClickHouse schema, derived identity and write path, shared by the Spyre CI ingests.
 
+> **Full reference:** class-by-class docs, every GitHub Actions and Jenkins consumer across
+> torch-spyre/spyre-inference/hf-adapters/spyre-frameworks, and getting-started guides live in
+> [`docs/`](docs/README.md).
+
 ## Why it is a library
 
 Every id here is **derived, never minted**: the product ingests and the Jenkins-side writer must
@@ -45,15 +49,18 @@ to change an id; if it ever does, those tests are the thing that must stop it.
 | `client.py` | `get_client`, `target_database`, `tables_present` |
 | `writer.py` | `insert_test_results`, `cases_already_ingested`, `insert_gha_artifact_result` |
 | `junit.py` | JUnit helpers + CI run-coordinate resolution |
+| `mark_retried.py` | stamps `result.retried` / `result.prior_*` on a retry's JUnit XML (stdlib-only; `spyre-mark-retried`) |
 | `hw_parse.py` | GHA log → `hw_failure_diagnostics` records (RAS events, phases, pytest counts) |
 | `hw_schema.py` | `hw_failure_diagnostics` columns + its `ADD COLUMN IF NOT EXISTS` migration |
 | `hw_diagnostics.py` | `build_row`/`insert_rows` for `hw_failure_diagnostics` |
 | `gha_logs.py` | fetching GHA job logs via `gh`, with transient-5xx retry |
+| `gha_runs.py` | polls GitHub Actions runs and jobs into `pipeline_runs` (`source='gha'`); the Jenkins rows come from spyre-frameworks |
 
 ## Tables modelled
 
 `test_cases`, `test_case_runs`, `benchmarks`, `benchmark_runs` (DDL: `functional_tests_v2.sql`)
-and `artifacts`, `artifact_refs`, `artifact_tags`, `artifact_results` (DDL: `artifacts_v2.sql`).
+and `artifacts`, `artifact_refs`, `artifact_tags`, `artifact_results` (DDL: `artifacts_v2.sql`),
+and `pipeline_runs` (DDL: `schema/47-pipeline-runs.sql`).
 The DDL itself is applied by the CI pipeline that owns the warehouse, not from this repo.
 
 The model holds columns, order and the DDL's CHECK sets — not the DDL itself. `TABLES` is pinned

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import inspect
 import logging
 import time
@@ -514,6 +513,8 @@ class CustomPreSchedulingPasses:
 
     def __init__(self):
         self.passes = [
+            #
+            # Convert for_each_tile WhileLoops bodies into inlined IR with loop_infos
             splice_while_loops,
             deadcode_elimination,
             #
