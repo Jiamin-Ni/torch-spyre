@@ -31,6 +31,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from torch_spyre._inductor.work_division import OpSplitSpace
+    from torch_spyre._inductor.wsr.enumerate_tilings import TilingSpace
 
 DEVICE = torch.device("spyre")
 
@@ -1004,6 +1005,7 @@ def mock_op_split_space(
     *,
     op: Any = None,
     legal: Callable[[dict], bool] | None = None,
+    tiling: "TilingSpace | None" = None,
 ) -> "OpSplitSpace":
     """An ``OpSplitSpace`` over stated domains, legal wherever ``legal`` says
     (everywhere by default). The real legality rules are tested against the
@@ -1016,9 +1018,15 @@ def mock_op_split_space(
     context = MagicMock()
     context.axes = list(domains)
     context.is_legal.side_effect = legal or (lambda splits: True)
-    return OpSplitSpace(
+    context.factor_domain.side_effect = domains.__getitem__
+    space = OpSplitSpace(
         op=MagicMock() if op is None else op,
         context=context,
         output_axes=frozenset(output_axes),
         factor_domains=domains,
+        tiling=tiling,
     )
+    # Every tiling is judged in this one context: how a per-tile frame narrows
+    # a domain is the real context's business.
+    space._context = lambda tiling: context  # type: ignore[method-assign]
+    return space
