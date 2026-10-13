@@ -36,8 +36,8 @@ import json
 import netrc
 import os
 import platform
+import re
 import shutil
-import string
 import socket
 import sys
 import tarfile
@@ -56,7 +56,9 @@ FAILED, REJECTED, INCOMPLETE = 1, 2, 3
 STATUS = {FAILED: "failed", REJECTED: "rejected", INCOMPLETE: "incomplete"}
 MANUAL_PREFIX = "manual:"
 # kind -> the extension of its results/ files.
-KINDS = {"junit": ".xml", "vllm": ".json"}
+KINDS = {"junit": ".xml", "vllm": ".json", "sendnn": ".txt"}
+# kinds whose test_type is always perf
+PERF_KINDS = ("vllm", "sendnn")
 VLLM_COMPONENT = "spyre-inference"
 RUN_MODES = ("latency", "throughput", "serve")
 # A record carrying any of these is a vLLM bench result (native) or vLLM's pytorch format.
@@ -91,106 +93,7 @@ def _date_time(value: str) -> bool:
         return False
 
 
-HEX = frozenset("0123456789abcdef")
-DIGITS = frozenset("0123456789")
-SLUG = frozenset(string.ascii_letters + string.digits + "._-")
-
-
-def _hex(s: str, n: int) -> bool:
-    return len(s) == n and set(s) <= HEX
-
-
-def _uuid(s: str) -> bool:
-    parts = s.split("-")
-    return [len(x) for x in parts] == [8, 4, 4, 4, 12] and all(
-        set(x) <= HEX for x in parts
-    )
-
-
-def _image(s: str) -> bool:
-    ref, sep, digest = s.rpartition("@sha256:")
-    return (
-        bool(sep and ref)
-        and "@" not in ref
-        and not any(c.isspace() for c in ref)
-        and _hex(digest, 64)
-    )
-
-
-def _jenkins_key(s: str) -> bool:
-    job, sep, build = s.partition("#")
-    return (
-        bool(sep and job and build)
-        and set(build) <= DIGITS
-        and not any(c.isspace() for c in job)
-    )
-
-
-def _manual_key(s: str) -> bool:
-    parts = s.split(":")
-    who_ok = frozenset(string.ascii_letters + string.digits + "._@+-")
-    token_ok = frozenset(string.ascii_letters + string.digits + "-")
-    return (
-        len(parts) == 3
-        and parts[0] == "manual"
-        and bool(parts[1] and parts[2])
-        and (set(parts[1]) <= who_ok and set(parts[2]) <= token_ok)
-    )
-
-
-def _bundle_path(s: str) -> bool:
-    if s.startswith("attachments/"):
-        rest = s[len("attachments/") :]
-        return bool(rest) and not any(c.isspace() for c in rest)
-    rest = s[len("results/") :] if s.startswith("results/") else ""
-    return "/" not in rest and any(
-        rest.endswith(e) and len(rest) > len(e) for e in (".xml", ".json")
-    )
-
-
-# Every `pattern` bundle.schema.json uses, as plain string logic: no `re` on an air-gapped host.
-# tests/test_bundle.py proves each agrees with the regex; `--from-bundle` re-checks with it.
-PATTERNS = {
-    "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$": lambda s: s
-    == ""
-    or _uuid(s),
-    "^([^\\s@]+@sha256:[0-9a-f]{64})?$": lambda s: s == "" or _image(s),
-    "^[a-z0-9][a-z0-9._-]*$": lambda s: bool(s)
-    and s[0] in string.ascii_lowercase + string.digits
-    and set(s) <= frozenset(string.ascii_lowercase + string.digits + "._-"),
-    "^(manual:[A-Za-z0-9._@+-]+:[A-Za-z0-9-]+|[^#\\s]+#[0-9]+)$": lambda s: _manual_key(
-        s
-    )
-    or _jenkins_key(s),
-    "^[^#\\s]+#[0-9]+$": _jenkins_key,
-    "^(results/[^/]+\\.(xml|json)|attachments/[^\\s]+)$": _bundle_path,
-    "^[0-9a-f]{64}$": lambda s: _hex(s, 64),
-    "^[0-9]+$": lambda s: bool(s) and set(s) <= DIGITS,
-}
-
-
-def pattern_match(pattern: str, value: str) -> bool:
-    """`value` against one of the schema's patterns; True for a pattern not in PATTERNS, which
-    only `--from-bundle` (with `regex`) checks."""
-    check = PATTERNS.get(pattern)
-    return check(value) if check else True
-
-
-def slug(key: str) -> str:
-    """Every run of characters outside [A-Za-z0-9._-] replaced by one "_"."""
-    out, replacing = [], False
-    for c in key:
-        if c in SLUG:
-            out.append(c)
-        elif not replacing:
-            out.append("_")
-        replacing = c not in SLUG
-    return "".join(out)
-
-
-def schema_errors(
-    value, node: dict, where: str = "bundle.json", match=pattern_match
-) -> list:
+def schema_errors(value, node: dict, where: str = "bundle.json") -> list:
     """`value` checked against the subset of JSON Schema bundle.schema.json uses."""
     errors = []
     if "const" in node and value != node["const"]:
@@ -204,7 +107,7 @@ def schema_errors(
     if isinstance(value, str):
         if len(value) < node.get("minLength", 0):
             errors.append(f"{where}: must not be empty")
-        if "pattern" in node and not match(node["pattern"], value):
+        if "pattern" in node and not re.search(node["pattern"], value):
             errors.append(f"{where}: {value!r} does not match {node['pattern']}")
         if node.get("format") == "date-time" and not _date_time(value):
             errors.append(f"{where}: {value!r} is not an ISO-8601 time with a zone")
@@ -212,7 +115,7 @@ def schema_errors(
         if len(value) < node.get("minItems", 0):
             errors.append(f"{where}: needs at least {node['minItems']} item(s)")
         for i, item in enumerate(value):
-            errors += schema_errors(item, node.get("items", {}), f"{where}[{i}]", match)
+            errors += schema_errors(item, node.get("items", {}), f"{where}[{i}]")
     if isinstance(value, dict):
         errors += [
             f"{where}: missing {k!r}"
@@ -225,11 +128,11 @@ def schema_errors(
         )
         for k, v in value.items():
             if k in props:
-                errors += schema_errors(v, props[k], f"{where}.{k}", match)
+                errors += schema_errors(v, props[k], f"{where}.{k}")
             elif extra is False:
                 errors.append(f"{where}: unknown key {k!r}")
             elif isinstance(extra, dict):
-                errors += schema_errors(v, extra, f"{where}.{k}", match)
+                errors += schema_errors(v, extra, f"{where}.{k}")
     return errors
 
 
@@ -281,7 +184,7 @@ def is_manual(key: str) -> bool:
 def bundle_name(meta: dict, digest: str) -> str:
     """Its inbox folder (or .tgz) name: unique, since its run key or its content is."""
     key = run_key(meta) or f"manual_{digest[:16]}"
-    return slug(key) + "-" + meta["test_type"]
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", key) + "-" + meta["test_type"]
 
 
 def upload_path(meta: dict, digest: str, inbox: str = "inbox") -> str:
@@ -381,7 +284,26 @@ def check_vllm(root: Path, meta: dict, results: list) -> None:
             raise BundleError(f"{p}: its name's {clash} differ from perf {clash}")
 
 
-def check(root: Path, match=pattern_match) -> dict:
+def check_sendnn(root: Path, meta: dict, results: list) -> None:
+    """Each results/*.txt is a perf-suite report_sendnn.txt: sections with a sendnn column."""
+    if meta["test_type"] != "perf":
+        raise BundleError("a sendnn bundle is test_type perf")
+    for p in results:
+        lines = [
+            line.split() for line in (root / p).read_text(errors="replace").splitlines()
+        ]
+        sections = sum(
+            1 for t in lines if t[:1] == ["Op:"] or t[:2] == ["Granite", "Config:"]
+        )
+        if not sections or not any(
+            t[:1] == ["Metric"] and "sendnn" in t for t in lines
+        ):
+            raise BundleError(
+                f"{p}: not a report_sendnn.txt (no Op:/Granite Config: sections with a sendnn column)"
+            )
+
+
+def check(root: Path) -> dict:
     """Validate the bundle at `root` offline; returns bundle.json with test_type filled in."""
     path = root / BUNDLE_FILE
     if not path.is_file():
@@ -397,7 +319,7 @@ def check(root: Path, match=pattern_match) -> dict:
         raise BundleError(
             f"schema_version {version} is newer than this ingest ({SCHEMA_VERSION})"
         )
-    errors = schema_errors(meta, schema(), match=match)
+    errors = schema_errors(meta, schema())
     if errors:
         raise BundleError("; ".join(errors))
     meta = normalized(meta)
@@ -406,7 +328,7 @@ def check(root: Path, match=pattern_match) -> dict:
     if meta.get("image") and not meta.get("artifact_id") and not meta.get("arch"):
         errors.append("an image names its artifact only with arch")
     kind = meta.get("kind", "junit")
-    meta["test_type"] = meta.get("test_type") or ("perf" if kind == "vllm" else "")
+    meta["test_type"] = meta.get("test_type") or ("perf" if kind in PERF_KINDS else "")
     if not meta["test_type"]:
         errors.append("test_type is required (the tier: unit, regression, fvt, ...)")
     if kind == "vllm" and (meta["test_type"], meta.get("component", VLLM_COMPONENT)) != (
@@ -458,6 +380,8 @@ def check(root: Path, match=pattern_match) -> dict:
         raise BundleError(f"no results/*{ext}: the bundle records nothing")
     if kind == "vllm":
         check_vllm(root, meta, results)
+    elif kind == "sendnn":
+        check_sendnn(root, meta, results)
     elif sum(count_cases(root / p) for p in results) == 0:
         raise BundleError(
             "no <testcase> in any results/*.xml: the bundle records nothing"
@@ -541,8 +465,12 @@ def _arch(value: str) -> str:
 
 def write(args) -> Path:
     """The bundle these `results` flags describe, written to --out (a folder, or a .tgz)."""
-    kind = "vllm" if (args.kind == "vllm" or args.vllm_results_dir) else "junit"
-    if kind == "vllm":
+    kind = "vllm" if (args.kind == "vllm" or args.vllm_results_dir) else args.kind
+    if kind == "sendnn":
+        if not args.sendnn_report:
+            raise BundleError("--kind sendnn needs --sendnn-report <report_sendnn.txt>")
+        results, extra = [Path(args.sendnn_report)], []
+    elif kind == "vllm":
         if not args.vllm_results_dir:
             raise BundleError("--kind vllm needs --vllm-results-dir")
         src = Path(args.vllm_results_dir)
@@ -561,7 +489,7 @@ def write(args) -> Path:
         "artifact_id": (args.artifact_id or "").strip(),
         "artifact": (args.artifact or "").strip(),
     }
-    meta = {"schema_version": SCHEMA_VERSION, **({"kind": kind} if kind == "vllm" else {}),
+    meta = {"schema_version": SCHEMA_VERSION, **({"kind": kind} if kind != "junit" else {}),
             **normalized(named), "arch": _arch(args.arch)}  # fmt: skip
     for key, value in (
         ("component", args.component), ("test_type", args.trigger_type),
@@ -798,6 +726,11 @@ def add_offline_options(parser) -> None:
     g.add_argument(
         "--vllm-results-dir", default="", help="vLLM bench *.json (implies --kind vllm)"
     )
+    g.add_argument(
+        "--sendnn-report",
+        default="",
+        help="--kind sendnn: the perf suite's report_sendnn.txt",
+    )
     g.add_argument("--perf", action="append", type=_pair, default=[],
                    help="vllm run context k=v: model, tensor_parallel, input_len, output_len, cards, "
                    "head_sha, head_branch, state")  # fmt: skip
@@ -819,6 +752,8 @@ def add_offline_options(parser) -> None:
         default="",
         help="--from-bundle: where it is kept; the run_url default",
     )
+    g.add_argument("--bundle-prop", action="append", type=_pair, default=[],
+                   help="--from-bundle: k=v added to the verdict's props (the source keys win)")  # fmt: skip
     g.add_argument("--trusted-job-prefix", action="append", default=[],
                    help="--from-bundle: accept a Jenkins run key only from these jobs")  # fmt: skip
     g.add_argument(

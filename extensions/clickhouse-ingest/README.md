@@ -60,10 +60,12 @@ to change an id; if it ever does, those tests are the thing that must stop it.
 | `tag_families.yaml` | the tag families (`SPYRE_TAG_FAMILIES` overrides it) |
 | `results.py` | the JUnit/benchmark XML ingest (`python -m spyre_clickhouse_ingest results`) |
 | `vllm.py` | vLLM bench JSON -> `benchmarks`/`benchmark_runs` (`report_kind=vllm`): spyre-inference's live perf ingest and vLLM bundles |
+| `sendnn.py` | the perf suite's report_sendnn.txt -> `benchmark_runs` on backend `sendnn` (`report_kind=perf-suite-sendnn-txt`): sendnn bundles |
 | `offline.py`, `bundle.schema.json` | `results --offline` / `--upload` / `--validate-only`: write, check and upload a results bundle, standard library only ([below](#offline-results-bundles)) |
 | `bundle.py` | `results --from-bundle`: record a bundle in spyre_v2 (the relay) |
 | `gha_runs.py` | polls GitHub Actions runs and jobs into `pipeline_runs` (`source='gha'`); the Jenkins rows come from spyre-frameworks |
 | `ci_run_timings.py` | one orchestrator run's timeline into `ci_run_timings`, a row per build and test leg (`python -m spyre_clickhouse_ingest ci-run-timings write`); the batch comes from spyre-frameworks |
+| `dispatch.py` | artifact subscriptions, requests and the dispatch ledger: derived ids, template rendering, the rate-limit/coalescing `decide`, and `python -m spyre_clickhouse_ingest dispatch request\|preview`; the trigger loop is spyre-frameworks' artifact-dispatch job |
 
 ## Naming an artifact (simple -> advanced)
 
@@ -144,6 +146,33 @@ A family's `spellings` are other prefixes a registry uses for it: `cicd-tech-pre
 as `ci-cd-tech-preview-vN`, with the raw spelling in the tag prop `registry_tag`, so one tech
 preview is one tag.
 
+## Dispatching on artifact events
+
+A subscription (`artifact_subscriptions`, schema in `schema/25-artifact-dispatch.sql`) names the
+events that trigger a target -- an artifact tagged, recorded or promoted, or a verdict recorded --
+with filters, conditions on the artifact's verdicts, exclusions, rate limits and coalescing.
+`v_artifact_subscribers` gives each (event, subscription) a `reason` (`''` = it fires). The
+spyre-frameworks job `Spyre/monitoring/artifact-dispatch` (`pipelines/ops/artifact-dispatch/`,
+whose README documents every field) triggers the targets and records each dispatch.
+
+```bash
+# What a subscription would do with the last 14 days of events, and why the rest would not fire.
+# Read-only: the dispatcher's own decision, rate limits and coalescing included.
+python -m spyre_clickhouse_ingest dispatch preview --subscription stf-torchspyre-s390x-tech-preview --days 14
+
+# Who one artifact triggers.
+python -m spyre_clickhouse_ingest dispatch preview --artifact id:<uuid> [--json]
+
+# Ask the dispatcher to run a subscription on one artifact (vars/v2Dispatch.groovy calls this).
+# Refused when the subscription's filters do not fit the artifact; a disabled one still runs.
+python -m spyre_clickhouse_ingest dispatch request --subscription <id> --artifact id:<uuid> \
+  --param TEST_CADENCE=nightly --requested-by user --requester <login> --reason "rerun" [--dry-run]
+```
+
+`request` prints the request and the `dispatch_id` its outcome will be recorded under in
+`artifact_dispatches`; the dispatcher picks it up within one 5-minute run. A request skips the
+subscription's conditions, exclusions, rate limits and coalescing.
+
 ## Moving off ingest_xml.py
 
 `.github/scripts/ingest_xml.py` only forwards to `python -m spyre_clickhouse_ingest results`
@@ -159,8 +188,9 @@ grep -rn 'scripts/ingest_xml\.py' --include='*.y*ml' --include='Jenkinsfile*' --
 
 `test_cases`, `test_case_runs`, `benchmarks`, `benchmark_runs` (DDL: `functional_tests_v2.sql`)
 and `artifacts`, `artifact_refs`, `artifact_tags`, `artifact_results` (DDL: `artifacts_v2.sql`),
-and `pipeline_runs` (DDL: `schema/47-pipeline-runs.sql`), and `ci_run_timings`
-(DDL: `schema/48-ci-run-timings.sql`).
+and `pipeline_runs` (DDL: `schema/47-pipeline-runs.sql`), `ci_run_timings`
+(DDL: `schema/48-ci-run-timings.sql`), and `artifact_subscriptions`, `dispatch_requests`,
+`artifact_dispatches` (DDL: `schema/25-artifact-dispatch.sql`).
 The DDL itself is applied by the CI pipeline that owns the warehouse, not from this repo.
 
 The model holds columns, order and the DDL's CHECK sets — not the DDL itself. `TABLES` is pinned
@@ -249,7 +279,7 @@ A folder, or a `.tgz` of one:
 
 ```
 bundle.json        # bundle.schema.json
-results/           # JUnit *.xml, or (kind vllm) vLLM bench *.json; flat
+results/           # JUnit *.xml, or (kind vllm) vLLM bench *.json, or (kind sendnn) report_sendnn.txt; flat
 attachments/...    # optional: logs, .cmd files; kept with the bundle, not ingested
 ```
 
@@ -259,6 +289,7 @@ The **minimal** bundle.json is the artifact and the tier, beside at least one re
 {"artifact_id": "<uuid>", "test_type": "regression"}
 {"image": "<repo>@sha256:<digest>", "arch": "s390x", "test_type": "fvt"}
 {"kind": "vllm", "artifact_id": "<uuid>"}
+{"kind": "sendnn", "artifact_id": "<uuid>", "started_at": "2026-10-06T11:56:00Z"}
 ```
 
 Everything else is optional (`--offline` writes most of it):
@@ -268,7 +299,7 @@ Everything else is optional (`--offline` writes most of it):
 | `schema_version` | 1; a newer version is refused |
 | `artifact_id`, `image` | at least one. The id is tried first, else the image on `arch` (lookup only). Both given: they must name the same artifact. Blank = absent |
 | `arch`, `component` | the artifact's (`component` is a test_case_id input; vllm: `spyre-inference`) |
-| `test_type` | required, except `perf` for `kind: vllm` |
+| `test_type` | required, except `perf` for `kind: vllm` and `kind: sendnn` |
 | `run_key` | `manual:<uploader>:<bundle sha256>`: re-uploading the same content stays one run. `<JOB_NAME>#<BUILD_NUMBER>` (alias `jenkins_run_key`) gets the run_id a connected `v2Results` run of that build gets, and is accepted only from trusted jobs (`Spyre-Test/testing/`) |
 | `files` | `[{path, sha256}]`. When present, every file must be listed and match; when absent, nothing is checked but the bundle sha256 is still recorded |
 | `started_at`, `ended_at` | `--offline` reads the JUnit suite timestamps; otherwise unset |
@@ -291,6 +322,13 @@ come from it.
   verdict, `perf.state` (default `passed`).
 - `.cmd`/`.log` files in `--vllm-results-dir` go to `attachments/`.
 
+**sendnn bundles** hold the perf suite's `report_sendnn.txt` (single-stack, or merged with
+torch-spyre; the sendnn column is read). No CI leg runs the sendnn stack, so this is its only way in.
+- Each `Op:` / `Granite Config:` section becomes a `benchmark_runs` row on backend `sendnn`, under the
+  same benchmark_id torch-spyre's report.xml gives that op (`sendnn.py`), so the two compare directly.
+- Rows carry `report_kind=perf-suite-sendnn-txt`, `source_file`, `platform` (arch) and `run_utc`
+  (from `started_at`), with a `perf` / `performance` verdict on the artifact.
+
 ### Air-gapped flow
 
 1. **While connected**, from the artifact's dashboard page: pull the image **by digest**, and
@@ -309,6 +347,10 @@ SAVE_TO_PYTORCH_BENCHMARK_FORMAT=1 python .github/scripts/run_vllm_benchmarks.py
     --configs-dir vllm-benchmarks/benchmarks/spyre --results-dir out ...
 python -m spyre_clickhouse_ingest results --offline --out mybundle.tgz --vllm-results-dir out \
     --artifact id:<artifact_id> --arch <arch> --perf head_sha=<spyre-inference sha>
+# sendnn (spyre-perf-suite `run_benchmark.py --stacks sendnn` writes docs/report_sendnn.txt)
+python -m spyre_clickhouse_ingest results --offline --out mybundle.tgz --kind sendnn \
+    --sendnn-report docs/report_sendnn.txt --artifact id:<artifact_id> --arch <arch> \
+    --triggered-at <ISO-8601 run time>
 # Connected host
 ARTIFACTORY_TOKEN=... python -m spyre_clickhouse_ingest results --upload mybundle.tgz --wait
 ```
@@ -354,6 +396,14 @@ Within 15 minutes the relay moves the bundle to `v2-results/processed/<key>/...`
 `results --from-bundle` exits `0` ingested or duplicate, `1` failed (retried), `2` rejected,
 `3` incomplete, and prints one JSON line on stdout. With `--dry-run` it runs every check on a
 read-only connection and writes nothing.
+
+### Retracted uploads and the HUD
+
+A retracted dashboard upload leaves every v2 view, which reads `v_artifact_results_published`.
+It does not leave the HUD projection (`schema/70`). Its rows stay in `oss_ci_benchmark_v3`, and in
+`oss_ci_benchmark_v3_by_tag` when it was retracted after a 15-minute refresh appended them. Its
+branch and commit stay in the metadata dropdowns too. The HUD reads these tables with PREWHERE, which
+a view cannot serve, so they cannot be filtered by a view. The follow-up is torch-spyre#5446.
 
 ## What is deliberately NOT here
 
