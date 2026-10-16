@@ -126,12 +126,12 @@ void JobPlanStepCompute::construct(LaunchContext& ctx,
         &(static_cast<SharedOwnerCtx*>(ctx.dynamic_alloc->get_context())
               ->composite_addr);
   }
-  
+
   std::unique_ptr<flex::ComputeParams, decltype(&flex::destroyComputeParams)>
-      params(
-          flex::createComputeParams(&program_address_, std::move(tensor_allocs),
-                                    name_, bootstrap_offset_, {}, dynamic_address),
-          flex::destroyComputeParams);
+      params(flex::createComputeParams(&program_address_,
+                                       std::move(tensor_allocs), name_,
+                                       bootstrap_offset_, {}, dynamic_address),
+             flex::destroyComputeParams);
   params->program_corrections = std::move(ctx.program_corrections);
   params->pipeline_barrier = pipeline_barrier_;
   if (ctx.dynamic_alloc) {

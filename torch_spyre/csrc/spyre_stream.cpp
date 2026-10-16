@@ -335,7 +335,7 @@ void SpyreStream::launch(const JobPlan& plan,
   // uses the separate segment-7 region.
   if (plan.dynamic_size > 0) {
     auto& allocator = SpyreAllocator::instance();
-    flex::AllocationDirective directive(flex::PlacementPolicy::Bind, {0},
+    flex::AllocationDirective directive(flex::PlacementPolicy::Bind, {},
                                         std::nullopt,
                                         flex::MemoryType::ProgramDynamic);
     ctx.dynamic_alloc = std::make_shared<c10::DataPtr>(
